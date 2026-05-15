@@ -1,0 +1,270 @@
+const express = require("express");
+const cors = require("cors");
+const Database = require("better-sqlite3");
+const path = require("path");
+const fs = require("fs");
+const cron = require("node-cron");
+const PORT = 3742;
+const DB_PATH = path.join(__dirname, "system.db");
+const app = express();
+app.use(cors());
+app.use(express.json());
+app.use(express.static(path.join(__dirname, "public")));
+const db = new Database(DB_PATH);
+db.pragma("journal_mode = WAL");
+db.exec(`CREATE TABLE IF NOT EXISTS player (id INTEGER PRIMARY KEY, name TEXT DEFAULT 'HUNTER', level INTEGER DEFAULT 1, xp INTEGER DEFAULT 0, stat_str INTEGER DEFAULT 5, stat_int INTEGER DEFAULT 5, stat_vit INTEGER DEFAULT 5, stat_agi INTEGER DEFAULT 5, stat_end INTEGER DEFAULT 5, stat_points INTEGER DEFAULT 0, gold INTEGER DEFAULT 0, rank TEXT DEFAULT 'E')`);
+db.exec(`CREATE TABLE IF NOT EXISTS quests (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, type TEXT DEFAULT 'daily', category TEXT DEFAULT 'STR', xp_reward INTEGER DEFAULT 20, gold_reward INTEGER DEFAULT 5, completed INTEGER DEFAULT 0, streak INTEGER DEFAULT 0, created_date TEXT DEFAULT CURRENT_DATE)`);
+db.exec(`CREATE TABLE IF NOT EXISTS daily_quest_templates (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, time TEXT, category TEXT DEFAULT 'STR', xp_reward INTEGER DEFAULT 20, gold_reward INTEGER DEFAULT 5)`);
+db.exec(`CREATE TABLE IF NOT EXISTS weekly_quest_templates (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, weekday INTEGER NOT NULL, category TEXT DEFAULT 'STR', xp_reward INTEGER DEFAULT 20, gold_reward INTEGER DEFAULT 5)`);
+db.exec(`CREATE TABLE IF NOT EXISTS weekly_quests (id INTEGER PRIMARY KEY AUTOINCREMENT, template_id INTEGER NOT NULL, title TEXT NOT NULL, weekday INTEGER NOT NULL, category TEXT DEFAULT 'STR', xp_reward INTEGER DEFAULT 20, gold_reward INTEGER DEFAULT 5, completed INTEGER DEFAULT 0, created_date TEXT DEFAULT CURRENT_DATE, FOREIGN KEY (template_id) REFERENCES weekly_quest_templates(id))`);
+db.exec(`CREATE TABLE IF NOT EXISTS ledger (id INTEGER PRIMARY KEY AUTOINCREMENT, type TEXT, description TEXT, gold_change INTEGER DEFAULT 0, xp_change INTEGER DEFAULT 0, timestamp TEXT DEFAULT CURRENT_TIMESTAMP)`);
+db.exec(`CREATE TABLE IF NOT EXISTS logs (id INTEGER PRIMARY KEY AUTOINCREMENT, event TEXT, timestamp TEXT DEFAULT CURRENT_TIMESTAMP)`);
+const existingPlayer = db.prepare("SELECT COUNT(*) as count FROM player").get().count;
+if (existingPlayer === 0) {
+  db.prepare(`INSERT INTO player (id, name, level, xp, stat_str, stat_int, stat_vit, stat_agi, stat_end, stat_points, gold, rank) VALUES (1, 'HUNTER', 1, 0, 5, 5, 5, 5, 5, 0, 0, 'E')`).run();
+  console.log("✓ Player initialized");
+}
+const templateCount = db.prepare("SELECT COUNT(*) as count FROM daily_quest_templates").get().count;
+if (templateCount === 0) {
+  const templates = [
+    { title: "Wake Up @ 6 AM", time: "6:00 AM", xp: 10 },
+    { title: "Walk Toby @ 6:30 AM", time: "6:30 AM", xp: 15 },
+    { title: "Gym @ 7 AM", time: "7:00 AM", xp: 25 },
+    { title: "Shower @ 8:15 AM", time: "8:15 AM", xp: 10 },
+    { title: "Feed Toby & Luna - 9 AM", time: "9:00 AM", xp: 10 },
+    { title: "Clean Kitchen, Table, Hallway, Bathroom, & Bedroom - 9:15 AM", time: "9:15 AM", xp: 20 },
+    { title: "Prepare Pre-Workout - 9:45 AM", time: "9:45 AM", xp: 10 },
+    { title: "Prepare Soda - 9:50 AM", time: "9:50 AM", xp: 10 },
+    { title: "Prepare Tomorrow's Clothes - 9:55 AM", time: "9:55 AM", xp: 10 },
+    { title: "Study @10 AM", time: "10:00 AM", xp: 30 },
+    { title: "Work @ 12 PM", time: "12:00 PM", xp: 50 },
+    { title: "Take Nightly Supplements & Walk Toby @ 9 PM", time: "9:00 PM", xp: 15 },
+    { title: "Do Parasympathetic Stretching @ 9:15 PM", time: "9:15 PM", xp: 15 },
+    { title: "Dark Room Decompression @ 9:40 PM", time: "9:40 PM", xp: 10 },
+    { title: "Final Check Before Bed @ 9:55 PM", time: "9:55 PM", xp: 10 },
+  ];
+  const insert = db.prepare(`INSERT INTO daily_quest_templates (title, time, category, xp_reward) VALUES (?, ?, 'INT', ?)`);
+  templates.forEach(t => insert.run(t.title, t.time, t.xp));
+  console.log("✓ Daily quest templates initialized");
+}
+const weeklyTemplateCount = db.prepare("SELECT COUNT(*) as count FROM weekly_quest_templates").get().count;
+if (weeklyTemplateCount === 0) {
+  const weeklyTemplates = [
+    { title: "Do Laundry & Set Timer", weekday: 0, xp: 10 },
+    { title: "Prepare Weekly Supplements", weekday: 0, xp: 10 },
+    { title: "Damon's Therapy @ 9:15 AM - 10:45 AM", weekday: 1, xp: 15 },
+    { title: "Damon's Therapy @ 8:00 AM - 8:30 AM", weekday: 4, xp: 15 },
+  ];
+  const insert = db.prepare(`INSERT INTO weekly_quest_templates (title, weekday, category, xp_reward) VALUES (?, ?, 'INT', ?)`);
+  weeklyTemplates.forEach(t => insert.run(t.title, t.weekday, t.xp));
+  console.log("✓ Weekly quest templates initialized");
+}
+function getPlayer() {
+  let player = db.prepare("SELECT * FROM player WHERE id = 1").get();
+  if (!player) {
+    db.prepare(`INSERT INTO player (id, name, level, xp, stat_str, stat_int, stat_vit, stat_agi, stat_end, stat_points, gold, rank) VALUES (1, 'HUNTER', 1, 0, 5, 5, 5, 5, 5, 0, 0, 'E')`).run();
+    player = db.prepare("SELECT * FROM player WHERE id = 1").get();
+  }
+  return {
+    id: player.id,
+    name: player.name,
+    level: player.level,
+    xp: player.xp,
+    xpNeeded: player.level * 100,
+    rank: player.rank,
+    gold: player.gold,
+    statPoints: player.stat_points,
+    stats: {
+      STR: player.stat_str,
+      INT: player.stat_int,
+      VIT: player.stat_vit,
+      AGI: player.stat_agi,
+      END: player.stat_end,
+    }
+  };
+}
+function generateDailyQuests() {
+  const today = new Date().toISOString().split('T')[0];
+  const existing = db.prepare("SELECT COUNT(*) as count FROM quests WHERE created_date = ? AND type = 'daily'").get(today);
+  if (existing.count === 0) {
+    const templates = db.prepare("SELECT * FROM daily_quest_templates").all();
+    const insert = db.prepare(`INSERT INTO quests (title, type, category, xp_reward, created_date) VALUES (?, 'daily', ?, ?, ?)`);
+    templates.forEach(t => insert.run(t.title, t.category, t.xp_reward, today));
+    console.log(`✓ Daily quests generated for ${today}`);
+  }
+}
+function generateWeeklyQuests() {
+  const today = new Date().toISOString().split('T')[0];
+  const dayOfWeek = new Date().getDay();
+  const existing = db.prepare("SELECT COUNT(*) as count FROM weekly_quests WHERE created_date = ?").get(today);
+  if (existing.count === 0) {
+    const templates = db.prepare("SELECT * FROM weekly_quest_templates WHERE weekday = ?").all(dayOfWeek);
+    const insert = db.prepare(`INSERT INTO weekly_quests (template_id, title, weekday, category, xp_reward, created_date) VALUES (?, ?, ?, ?, ?, ?)`);
+    templates.forEach(t => insert.run(t.id, t.title, t.weekday, t.category, t.xp_reward, today));
+    console.log(`✓ Weekly quests generated for ${today}`);
+  }
+}
+generateDailyQuests();
+generateWeeklyQuests();
+cron.schedule("0 0 * * *", () => {
+  console.log("🌙 Midnight - generating daily and weekly quests");
+  generateDailyQuests();
+  generateWeeklyQuests();
+});
+app.get("/api/player", (_, res) => {
+  res.json(getPlayer());
+});
+app.patch("/api/player/name", (req, res) => {
+  const { name } = req.body;
+  db.prepare("UPDATE player SET name = ? WHERE id = 1").run(name);
+  res.json(getPlayer());
+});
+app.post("/api/player/allocate-stat", (req, res) => {
+  const { stat } = req.body;
+  const player = db.prepare("SELECT * FROM player WHERE id = 1").get();
+  if (player.stat_points < 1) return res.status(400).json({ error: "No stat points" });
+  const statCol = `stat_${stat.toLowerCase()}`;
+  db.prepare(`UPDATE player SET ${statCol} = ${statCol} + 1, stat_points = stat_points - 1 WHERE id = 1`).run();
+  res.json(getPlayer());
+});
+app.get("/api/quests", (_, res) => {
+  const today = new Date().toISOString().split('T')[0];
+  const dailyQuests = db.prepare("SELECT * FROM quests WHERE type = 'daily' AND created_date = ? ORDER BY id").all(today);
+  const weeklyQuests = db.prepare("SELECT * FROM weekly_quests WHERE created_date = ? ORDER BY id").all(today);
+  const dailiesCompleted = dailyQuests.filter(q => q.completed).length;
+  const weekliesCompleted = weeklyQuests.filter(q => q.completed).length;
+  const perfectClearBonus = dailiesCompleted === dailyQuests.length && dailyQuests.length > 0 ? 50 : 0;
+  res.json({
+    dailyQuests: dailyQuests.map(q => ({id: q.id, title: q.title, type: q.type, xpReward: q.xp_reward, completed: Boolean(q.completed)})),
+    weeklyQuests: weeklyQuests.map(q => ({id: q.id, title: q.title, xpReward: q.xp_reward, completed: Boolean(q.completed)})),
+    dailiesCompleted, weekliesCompleted, totalDailies: dailyQuests.length, totalWeeklies: weeklyQuests.length, hasWeeklyQuests: weeklyQuests.length > 0, perfectClearBonus,
+  });
+});
+app.get("/api/weekly-quests/all", (_, res) => {
+  const allWeeklyQuests = db.prepare("SELECT * FROM weekly_quest_templates ORDER BY weekday, id").all();
+  const dayNames = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+  res.json(allWeeklyQuests.map(q => ({
+    id: q.id,
+    title: q.title,
+    weekday: q.weekday,
+    dayName: dayNames[q.weekday],
+    xpReward: q.xp_reward,
+    category: q.category
+  })));
+});
+
+// DEBUG ENDPOINT
+app.get("/api/debug/weekly-quests", (_, res) => {
+  const today = new Date().toISOString().split('T')[0];
+  const dayOfWeek = new Date().getDay();
+  const allQuests = db.prepare("SELECT id, template_id, title, created_date FROM weekly_quests ORDER BY id").all();
+  const todaysQuests = db.prepare("SELECT id, template_id, title FROM weekly_quests WHERE created_date = ? ORDER BY id").all(today);
+  const templates = db.prepare("SELECT id, title, weekday FROM weekly_quest_templates ORDER BY id").all();
+  res.json({
+    message: "Debug: Weekly quests status",
+    currentDate: today,
+    currentDayOfWeek: dayOfWeek,
+    dayName: ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"][dayOfWeek],
+    allWeeklyQuestsInDB: allQuests,
+    todaysWeeklyQuests: todaysQuests,
+    templates: templates,
+    totalQuestsInDB: allQuests.length,
+    totalTodaysQuests: todaysQuests.length
+  });
+});
+
+app.post("/api/quests/:id/complete", (req, res) => {
+  try {
+    const questRow = db.prepare("SELECT * FROM quests WHERE id = ?").get(req.params.id);
+    if (!questRow) return res.status(404).json({ error: "Quest not found" });
+    db.prepare("UPDATE quests SET completed = 1 WHERE id = ?").run(req.params.id);
+    const playerRow = db.prepare("SELECT * FROM player WHERE id = 1").get();
+    const xpReward = questRow.xp_reward || 20;
+    const newXp = playerRow.xp + xpReward;
+    const xpNeeded = playerRow.level * 100;
+    let leveledUp = false, newLevel = playerRow.level, statPointsGained = 0;
+    if (newXp >= xpNeeded) {
+      leveledUp = true;
+      newLevel = playerRow.level + 1;
+      statPointsGained = 1;
+      db.prepare(`UPDATE player SET level = ?, xp = 0, stat_points = stat_points + 1 WHERE id = 1`).run(newLevel);
+    } else {
+      db.prepare(`UPDATE player SET xp = ? WHERE id = 1`).run(newXp);
+    }
+    res.json({ xpGained: xpReward, leveledUp, newLevel, statPointsGained });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+app.post("/api/quests/:id/uncomplete", (req, res) => {
+  try {
+    const questRow = db.prepare("SELECT * FROM quests WHERE id = ?").get(req.params.id);
+    if (!questRow) return res.status(404).json({ error: "Quest not found" });
+    db.prepare("UPDATE quests SET completed = 0 WHERE id = ?").run(req.params.id);
+    const playerRow = db.prepare("SELECT * FROM player WHERE id = 1").get();
+    const xpLost = questRow.xp_reward || 20;
+    const newXp = Math.max(0, playerRow.xp - xpLost);
+    db.prepare(`UPDATE player SET xp = ? WHERE id = 1`).run(newXp);
+    res.json({ xpLost: xpLost, newXp: newXp });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+app.post("/api/weekly-quests/:id/complete", (req, res) => {
+  try {
+    const questRow = db.prepare("SELECT * FROM weekly_quests WHERE id = ?").get(req.params.id);
+    if (!questRow) return res.status(404).json({ error: "Quest not found" });
+    db.prepare("UPDATE weekly_quests SET completed = 1 WHERE id = ?").run(req.params.id);
+    const playerRow = db.prepare("SELECT * FROM player WHERE id = 1").get();
+    const xpReward = questRow.xp_reward || 20;
+    const newXp = playerRow.xp + xpReward;
+    const xpNeeded = playerRow.level * 100;
+    let leveledUp = false, newLevel = playerRow.level, statPointsGained = 0;
+    if (newXp >= xpNeeded) {
+      leveledUp = true;
+      newLevel = playerRow.level + 1;
+      statPointsGained = 1;
+      db.prepare(`UPDATE player SET level = ?, xp = 0, stat_points = stat_points + 1 WHERE id = 1`).run(newLevel);
+    } else {
+      db.prepare(`UPDATE player SET xp = ? WHERE id = 1`).run(newXp);
+    }
+    res.json({ xpGained: xpReward, leveledUp, newLevel, statPointsGained });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+app.post("/api/weekly-quests/:id/uncomplete", (req, res) => {
+  try {
+    const questRow = db.prepare("SELECT * FROM weekly_quests WHERE id = ?").get(req.params.id);
+    if (!questRow) return res.status(404).json({ error: "Quest not found" });
+    db.prepare("UPDATE weekly_quests SET completed = 0 WHERE id = ?").run(req.params.id);
+    const playerRow = db.prepare("SELECT * FROM player WHERE id = 1").get();
+    const xpLost = questRow.xp_reward || 20;
+    const newXp = Math.max(0, playerRow.xp - xpLost);
+    db.prepare(`UPDATE player SET xp = ? WHERE id = 1`).run(newXp);
+    res.json({ xpLost: xpLost, newXp: newXp });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+app.get("/api/ledger", (req, res) => {
+  const limit = req.query.limit || 50;
+  const entries = db.prepare("SELECT * FROM ledger ORDER BY id DESC LIMIT ?").all(limit);
+  res.json(entries);
+});
+app.post("/api/ledger", (req, res) => {
+  const { type, description, goldChange, xpChange } = req.body;
+  const result = db.prepare(`INSERT INTO ledger (type, description, gold_change, xp_change) VALUES (?, ?, ?, ?)`).run(type, description, goldChange, xpChange);
+  res.json({ id: result.lastInsertRowid, type, description, goldChange, xpChange });
+});
+app.get("/api/logs", (_, res) => {
+  const logs = db.prepare("SELECT * FROM logs ORDER BY id DESC LIMIT 50").all();
+  res.json(logs);
+});
+app.get("/api/ping", (_, res) => {
+  res.json({ status: "online", time: new Date().toISOString() });
+});
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`SYSTEM ONLINE — Port ${PORT}`);
+  console.log(`Daily and weekly quests initialized`);
+});

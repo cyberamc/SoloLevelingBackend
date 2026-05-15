@@ -59,19 +59,56 @@ if (weeklyTemplateCount === 0) {
   weeklyTemplates.forEach(t => insert.run(t.title, t.weekday, t.xp));
   console.log("✓ Weekly quest templates initialized");
 }
+
+function calculateXpForLevel(level) {
+  return 100 * level;
+}
+
+function calculateTotalXpForLevel(level) {
+  return 100 * level * (level + 1) / 2;
+}
+
+function calculateLevelFromXp(xp) {
+  let level = 1;
+  while (calculateTotalXpForLevel(level + 1) <= xp) {
+    level++;
+  }
+  return level;
+}
+
+function calculateRank(level) {
+  if (level >= 50) return 'S';
+  if (level >= 30) return 'A';
+  if (level >= 20) return 'B';
+  if (level >= 10) return 'C';
+  if (level >= 5) return 'D';
+  return 'E';
+}
+
 function getPlayer() {
   let player = db.prepare("SELECT * FROM player WHERE id = 1").get();
   if (!player) {
     db.prepare(`INSERT INTO player (id, name, level, xp, stat_str, stat_int, stat_vit, stat_agi, stat_end, stat_points, gold, rank) VALUES (1, 'HUNTER', 1, 0, 5, 5, 5, 5, 5, 0, 0, 'E')`).run();
     player = db.prepare("SELECT * FROM player WHERE id = 1").get();
   }
+  
+  const level = calculateLevelFromXp(player.xp);
+  const rank = calculateRank(level);
+  const nextLevelXp = calculateTotalXpForLevel(level + 1);
+  const currentLevelXp = calculateTotalXpForLevel(level);
+  const xpInCurrentLevel = player.xp - currentLevelXp;
+  const xpNeededForLevel = nextLevelXp - currentLevelXp;
+
   return {
     id: player.id,
     name: player.name,
-    level: player.level,
+    level: level,
     xp: player.xp,
-    xpNeeded: player.level * 100,
-    rank: player.rank,
+    xpInCurrentLevel: xpInCurrentLevel,
+    xpNeededForLevel: xpNeededForLevel,
+    totalXp: player.xp,
+    totalXpNeeded: nextLevelXp,
+    rank: rank,
     gold: player.gold,
     statPoints: player.stat_points,
     stats: {
@@ -83,6 +120,7 @@ function getPlayer() {
     }
   };
 }
+
 function generateDailyQuests() {
   const today = new Date().toISOString().split('T')[0];
   const existing = db.prepare("SELECT COUNT(*) as count FROM quests WHERE created_date = ? AND type = 'daily'").get(today);
@@ -102,14 +140,16 @@ function generateWeeklyQuests() {
   const existing = db.prepare("SELECT COUNT(*) as count FROM weekly_quests WHERE created_date = ?").get(today);
   if (existing.count === 0) {
     const calendar = new Date();
-    const todayWeekday = calendar.getDay();  // 0 = Sunday
+    const todayWeekday = calendar.getDay();
     
     const templates = db.prepare("SELECT * FROM weekly_quest_templates WHERE weekday = ?").all(todayWeekday);
     const insert = db.prepare(`INSERT INTO weekly_quests (template_id, title, weekday, category, xp_reward, created_date) VALUES (?, ?, ?, ?, ?, ?)`);
     templates.forEach(t => {
       insert.run(t.id, t.title, t.weekday, t.category, t.xp_reward, today);
     });
-    console.log(`✓ Weekly quests generated for ${today}`);
+    if (templates.length > 0) {
+      console.log(`✓ Weekly quests generated for ${today} (${templates.length} quests)`);
+    }
   }
 }
 

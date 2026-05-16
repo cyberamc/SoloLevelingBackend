@@ -172,6 +172,8 @@ app.post("/api/player/allocate-stat", (req, res) => {
   res.json(getPlayer());
 });
 app.get("/api/quests", (_, res) => {
+  generateDailyQuests();
+  generateWeeklyQuests();
   const today = new Date().toISOString().split('T')[0];
   const dailyQuests = db.prepare("SELECT * FROM quests WHERE type = 'daily' AND created_date = ? ORDER BY id").all(today);
   const weeklyQuests = db.prepare("SELECT * FROM weekly_quests WHERE created_date = ? ORDER BY id").all(today);

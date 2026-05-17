@@ -95,7 +95,7 @@ function getPlayer() {
   const level = calculateLevelFromXp(player.xp);
   const rank = calculateRank(level);
   const nextLevelXp = calculateTotalXpForLevel(level + 1);
-  const currentLevelXp = calculateTotalXpForLevel(level);
+  const currentLevelXp = level === 1 ? 0 : calculateTotalXpForLevel(level);
   const xpInCurrentLevel = player.xp - currentLevelXp;
   const xpNeededForLevel = nextLevelXp - currentLevelXp;
 

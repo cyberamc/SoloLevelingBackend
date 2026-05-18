@@ -176,9 +176,10 @@ app.get("/api/quests", (_, res) => {
   generateWeeklyQuests();
   const today = new Date().toISOString().split('T')[0];
   const dailyQuests = db.prepare("SELECT * FROM quests WHERE type = 'daily' AND created_date = ? ORDER BY id").all(today);
-  const weeklyQuests = db.prepare("SELECT * FROM weekly_quests WHERE created_date = ? ORDER BY id").all(today);
+  const weeklyQuests = db.prepare("SELECT wq.*, wt.optional FROM weekly_quests wq LEFT JOIN weekly_quest_templates wt ON wq.template_id = wt.id WHERE wq.created_date = ? ORDER BY wq.id").all(today);
   const dailiesCompleted = dailyQuests.filter(q => q.completed).length;
-  const weekliesCompleted = weeklyQuests.filter(q => q.completed).length;
+  const requiredWeeklies = weeklyQuests.filter(q => !q.optional);
+  const weekliesCompleted = requiredWeeklies.filter(q => q.completed).length;
   res.json({
     dailyQuests: dailyQuests.map(q => ({
       id: q.id,
@@ -198,13 +199,14 @@ app.get("/api/quests", (_, res) => {
       xpReward: q.xp_reward,
       goldReward: q.gold_reward,
       completed: q.completed === 1,
-      streak: q.streak
+      streak: q.streak,
+      optional: q.optional === 1
     })),
     dailiesCompleted,
     weekliesCompleted,
     totalDailies: dailyQuests.length,
-    totalWeeklies: weeklyQuests.length,
-    hasWeeklyQuests: weeklyQuests.length > 0,
+    totalWeeklies: requiredWeeklies.length,
+    hasWeeklyQuests: requiredWeeklies.length > 0,
     perfectClearBonus: dailiesCompleted === dailyQuests.length && dailyQuests.length > 0 ? 50 : 0
   });
 });
@@ -222,7 +224,8 @@ app.get("/api/weekly-quests/all", (_, res) => {
       category: t.category,
       xpReward: t.xp_reward,
       goldReward: t.gold_reward,
-      completed: completed ? completed.completed === 1 : false
+      completed: completed ? completed.completed === 1 : false,
+      optional: t.optional === 1
     };
   });
   res.json(result);
@@ -246,6 +249,9 @@ app.post("/api/quests/:id/uncomplete", (req, res) => {
     const questRow = db.prepare("SELECT * FROM quests WHERE id = ?").get(req.params.id);
     if (!questRow) return res.status(404).json({ error: "Quest not found" });
     db.prepare("UPDATE quests SET completed = 0 WHERE id = ?").run(req.params.id);
+    const playerRow = db.prepare("SELECT * FROM player WHERE id = 1").get();
+    const newXp = Math.max(0, playerRow.xp - questRow.xp_reward);
+    db.prepare("UPDATE player SET xp = ? WHERE id = 1").run(newXp);
     res.json({ success: true, player: getPlayer() });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -300,4 +306,16 @@ app.get("/api/ping", (_, res) => {
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`SYSTEM ONLINE — Port ${PORT}`);
   console.log(`Daily and weekly quests initialized`);
+});
+
+// Reset daily quests at midnight every day
+cron.schedule('0 0 * * *', () => {
+  db.prepare("DELETE FROM quests WHERE type = 'daily'").run();
+  console.log("✓ Daily quests reset for new day");
+});
+
+// Reset weekly quests every Sunday at midnight
+cron.schedule('0 0 * * 0', () => {
+  db.prepare("DELETE FROM weekly_quests").run();
+  console.log("✓ Weekly quests reset for new week");
 });

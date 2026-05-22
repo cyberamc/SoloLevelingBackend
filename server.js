@@ -31,7 +31,7 @@ function calculateRank(level) {
 function getPlayer() {
   let player = db.prepare("SELECT * FROM player WHERE id = 1").get();
   if (!player) {
-    db.prepare("INSERT INTO player (id, name, level, xp, rank) VALUES (1, 'HUNTER', 1, 0, 'E')").run();
+    db.prepare("INSERT INTO player (id, name, level, xp, rank, nofap_streak) VALUES (1, 'HUNTER', 1, 0, 'E', 0)").run();
   }
   player = db.prepare("SELECT * FROM player WHERE id = 1").get();
   const level = calculateLevelFromXp(player.xp);
@@ -47,7 +47,8 @@ function getPlayer() {
     totalXp: player.xp,
     totalXpNeeded: nextLevelXp,
     rank: calculateRank(level),
-    gold: player.gold
+    gold: player.gold,
+    nofapStreak: player.nofap_streak || 0
   };
 }
 
@@ -149,6 +150,12 @@ app.post("/api/quests/:id/complete", (req, res) => {
   const quest = db.prepare("SELECT * FROM quests WHERE id = ?").get(req.params.id);
   db.prepare("UPDATE quests SET completed = 1 WHERE id = ?").run(req.params.id);
   db.prepare("UPDATE player SET xp = xp + ? WHERE id = 1").run(quest.xp_reward);
+  
+  // Track nofap streak when "You Didn't Fap Today" is completed
+  if (quest.title && quest.title.includes("You Didn't Fap Today")) {
+    db.prepare("UPDATE player SET nofap_streak = nofap_streak + 1 WHERE id = 1").run();
+  }
+  
   res.json({ success: true, xpGained: quest.xp_reward });
 });
 
@@ -156,6 +163,12 @@ app.post("/api/quests/:id/uncomplete", (req, res) => {
   const quest = db.prepare("SELECT * FROM quests WHERE id = ?").get(req.params.id);
   db.prepare("UPDATE quests SET completed = 0 WHERE id = ?").run(req.params.id);
   db.prepare("UPDATE player SET xp = xp - ? WHERE id = 1").run(quest.xp_reward);
+  
+  // Decrement nofap streak if "You Didn't Fap Today" is uncompleted
+  if (quest.title && quest.title.includes("You Didn't Fap Today")) {
+    db.prepare("UPDATE player SET nofap_streak = MAX(0, nofap_streak - 1) WHERE id = 1").run();
+  }
+  
   res.json({ success: true, xpLost: quest.xp_reward });
 });
 

@@ -146,7 +146,8 @@ app.get("/api/quests", (req, res) => {
 app.get("/api/weekly-quests/all", (req, res) => {
   generateWeeklyQuests();
   
-  const todayWeekday = new Date().getDay();
+  const todayWeekdayResult = db.prepare("SELECT CAST(strftime('%w', 'now', 'localtime') AS INTEGER) as dayOfWeek").get();
+  const todayWeekday = todayWeekdayResult.dayOfWeek;
   
   // Calculate this week's Sunday using SQLite with localtime
   const sundayResult = db.prepare("SELECT date('now', 'localtime', '-' || CAST(strftime('%w', 'now', 'localtime') AS TEXT) || ' days') as sunday").get();
@@ -155,7 +156,7 @@ app.get("/api/weekly-quests/all", (req, res) => {
   const all = db.prepare("SELECT wq.* FROM weekly_quests wq WHERE wq.week_start_date = ? ORDER BY wq.weekday, wq.optional, wq.completed").all(week_start_date);
   const withOverdue = all.map(q => ({
     ...q,
-    isOverdue: q.completed === 0 && q.optional === 0 && q.weekday < todayWeekday ? 1 : 0
+    isOverdue: q.completed === 0 && q.optional === 0 && q.weekday > todayWeekday ? 1 : 0
   }));
   
   res.json(withOverdue);

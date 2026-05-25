@@ -55,8 +55,8 @@ function getPlayer() {
 function generateDailyQuests() {
   const today = new Date().toISOString().split('T')[0];
   
-  // Delete yesterday's quests to force fresh generation
-  db.prepare("DELETE FROM quests WHERE type = 'daily' AND created_date != ?").run(today);
+  // CRITICAL: Delete ALL old daily quests from previous days to ensure clean reset
+  db.prepare("DELETE FROM quests WHERE type = 'daily' AND created_date < ?").run(today);
   
   const existing = db.prepare("SELECT COUNT(*) as count FROM quests WHERE created_date = ? AND type = 'daily'").get(today);
   
@@ -88,7 +88,7 @@ function generateDailyQuests() {
         insert.run(title, t.category, t.xp_reward, today, t.optional);
       }
     });
-    console.log("Daily quests for " + today);
+    console.log("Daily quests generated for " + today);
   }
 }
 
@@ -98,6 +98,9 @@ function generateWeeklyQuests() {
   // Calculate this week's Sunday using SQLite with localtime (subtract weekday number from today)
   const sundayResult = db.prepare("SELECT date('now', 'localtime', '-' || CAST(strftime('%w', 'now', 'localtime') AS TEXT) || ' days') as sunday").get();
   const week_start_date = sundayResult.sunday;
+  
+  // CRITICAL: Delete all weekly quests from PREVIOUS weeks
+  db.prepare("DELETE FROM weekly_quests WHERE week_start_date < ?").run(week_start_date);
   
   // For each day of the week (0-6), check if quests need to be regenerated
   for (let weekday = 0; weekday <= 6; weekday++) {
@@ -114,6 +117,22 @@ function generateWeeklyQuests() {
     }
   }
 }
+
+// Scheduled midnight reset - runs every minute and checks if it's midnight
+function startMidnightScheduler() {
+  setInterval(() => {
+    const now = new Date();
+    // Check if current time is between 00:00:00 and 00:00:59
+    if (now.getHours() === 0 && now.getMinutes() === 0) {
+      console.log("Midnight reset triggered at " + now.toISOString());
+      generateDailyQuests();
+      generateWeeklyQuests();
+    }
+  }, 1000); // Check every second
+}
+
+// Start the scheduler when server starts
+startMidnightScheduler();
 
 app.get("/api/player", (req, res) => {
   res.json(getPlayer());

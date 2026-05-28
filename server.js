@@ -55,13 +55,12 @@ function getPlayer() {
 function generateDailyQuests() {
   const today = new Date().toISOString().split('T')[0];
   
-  // CRITICAL: Delete ALL old daily quests from previous days to ensure clean reset
   db.prepare("DELETE FROM quests WHERE type = 'daily' AND created_date < ?").run(today);
+  db.prepare("UPDATE quests SET completed = 0 WHERE type = 'daily' AND created_date = ? AND optional = 0").run(today);
   
   const existing = db.prepare("SELECT COUNT(*) as count FROM quests WHERE created_date = ? AND type = 'daily'").get(today);
   
   if (existing.count === 0) {
-    // Use SQLite to get day of week (0=Sunday, 1=Monday, 2=Tuesday, etc)
     const dayResult = db.prepare("SELECT CAST(strftime('%w', ?) AS INTEGER) as dayOfWeek").get(today);
     const dayOfWeek = dayResult.dayOfWeek;
     const isDeliveryDay = dayOfWeek === 2 || dayOfWeek === 3;
@@ -95,19 +94,27 @@ function generateDailyQuests() {
 function generateWeeklyQuests() {
   const today = new Date().toISOString().split('T')[0];
   
-  // Calculate this week's Sunday using SQLite with localtime (subtract weekday number from today)
   const sundayResult = db.prepare("SELECT date('now', 'localtime', '-' || CAST(strftime('%w', 'now', 'localtime') AS TEXT) || ' days') as sunday").get();
   const week_start_date = sundayResult.sunday;
   
-  // CRITICAL: Delete all weekly quests from PREVIOUS weeks
+  const todayWeekdayResult = db.prepare("SELECT CAST(strftime('%w', 'now', 'localtime') AS INTEGER) as dayOfWeek").get();
+  const todayWeekday = todayWeekdayResult.dayOfWeek;
+  
+  // Delete quests from old weeks
   db.prepare("DELETE FROM weekly_quests WHERE week_start_date < ?").run(week_start_date);
   
-  // For each day of the week (0-6), check if quests need to be regenerated
+  // Reset today's weekday quests if their created_date is before today (their reset day)
+  const resetResult = db.prepare("UPDATE weekly_quests SET completed = 0, created_date = ? WHERE weekday = ? AND week_start_date = ? AND created_date < ?")
+    .run(today, todayWeekday, week_start_date, today);
+  
+  if (resetResult.changes > 0) {
+    console.log("Reset " + resetResult.changes + " weekly quests for weekday " + todayWeekday);
+  }
+  
   for (let weekday = 0; weekday <= 6; weekday++) {
     const existing = db.prepare("SELECT COUNT(*) as count FROM weekly_quests WHERE week_start_date = ? AND weekday = ?").get(week_start_date, weekday);
     
     if (existing.count === 0) {
-      // Regenerate quests for this weekday
       const templates = db.prepare("SELECT * FROM weekly_quest_templates WHERE weekday = ?").all(weekday);
       const insert = db.prepare("INSERT INTO weekly_quests (template_id, title, weekday, category, xp_reward, created_date, optional, week_start_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
       
@@ -118,20 +125,17 @@ function generateWeeklyQuests() {
   }
 }
 
-// Scheduled midnight reset - runs every minute and checks if it's midnight
 function startMidnightScheduler() {
   setInterval(() => {
     const now = new Date();
-    // Check if current time is between 00:00:00 and 00:00:59
     if (now.getHours() === 0 && now.getMinutes() === 0) {
       console.log("Midnight reset triggered at " + now.toISOString());
       generateDailyQuests();
       generateWeeklyQuests();
     }
-  }, 1000); // Check every second
+  }, 1000);
 }
 
-// Start the scheduler when server starts
 startMidnightScheduler();
 
 app.get("/api/player", (req, res) => {
@@ -144,7 +148,6 @@ app.get("/api/quests", (req, res) => {
   
   const today = new Date().toISOString().split('T')[0];
   
-  // Calculate this week's Sunday using SQLite with localtime
   const sundayResult = db.prepare("SELECT date('now', 'localtime', '-' || CAST(strftime('%w', 'now', 'localtime') AS TEXT) || ' days') as sunday").get();
   const week_start_date = sundayResult.sunday;
   
@@ -168,56 +171,61 @@ app.get("/api/weekly-quests/all", (req, res) => {
   const todayWeekdayResult = db.prepare("SELECT CAST(strftime('%w', 'now', 'localtime') AS INTEGER) as dayOfWeek").get();
   const todayWeekday = todayWeekdayResult.dayOfWeek;
   
-  // Calculate this week's Sunday using SQLite with localtime
   const sundayResult = db.prepare("SELECT date('now', 'localtime', '-' || CAST(strftime('%w', 'now', 'localtime') AS TEXT) || ' days') as sunday").get();
   const week_start_date = sundayResult.sunday;
   
   const all = db.prepare("SELECT wq.* FROM weekly_quests wq WHERE wq.week_start_date = ? ORDER BY wq.weekday, wq.optional, wq.completed").all(week_start_date);
   const withOverdue = all.map(q => ({
     ...q,
-    isOverdue: q.completed === 0 && q.optional === 0 && q.weekday > todayWeekday ? 1 : 0
+    isOverdue: q.completed === 0 && q.optional === 0 && (q.weekday > todayWeekday || (q.weekday === 0 && todayWeekday !== 0)) ? 1 : 0
   }));
   
   res.json(withOverdue);
 });
 
 app.post("/api/quests/:id/complete", (req, res) => {
+  console.log("RECEIVED COMPLETE REQUEST FOR QUEST: " + req.params.id);
   const quest = db.prepare("SELECT * FROM quests WHERE id = ?").get(req.params.id);
   db.prepare("UPDATE quests SET completed = 1 WHERE id = ?").run(req.params.id);
   db.prepare("UPDATE player SET xp = xp + ? WHERE id = 1").run(quest.xp_reward);
   
-  // Track nofap streak when "You Didn't Fap Today" is completed
   if (quest.title && quest.title.includes("You Didn't Fap Today")) {
     db.prepare("UPDATE player SET nofap_streak = nofap_streak + 1 WHERE id = 1").run();
   }
   
+  console.log("QUEST COMPLETED: " + req.params.id);
   res.json({ success: true, xpGained: quest.xp_reward });
 });
 
 app.post("/api/quests/:id/uncomplete", (req, res) => {
+  console.log("RECEIVED UNCOMPLETE REQUEST FOR QUEST: " + req.params.id);
   const quest = db.prepare("SELECT * FROM quests WHERE id = ?").get(req.params.id);
   db.prepare("UPDATE quests SET completed = 0 WHERE id = ?").run(req.params.id);
   db.prepare("UPDATE player SET xp = xp - ? WHERE id = 1").run(quest.xp_reward);
   
-  // Decrement nofap streak if "You Didn't Fap Today" is uncompleted
   if (quest.title && quest.title.includes("You Didn't Fap Today")) {
     db.prepare("UPDATE player SET nofap_streak = MAX(0, nofap_streak - 1) WHERE id = 1").run();
   }
   
+  console.log("QUEST UNCOMPLETED: " + req.params.id);
   res.json({ success: true, xpLost: quest.xp_reward });
 });
 
 app.post("/api/weekly-quests/:id/complete", (req, res) => {
+  console.log("RECEIVED WEEKLY COMPLETE REQUEST FOR QUEST: " + req.params.id);
   const quest = db.prepare("SELECT * FROM weekly_quests WHERE id = ?").get(req.params.id);
   db.prepare("UPDATE weekly_quests SET completed = 1 WHERE id = ?").run(req.params.id);
   db.prepare("UPDATE player SET xp = xp + ? WHERE id = 1").run(quest.xp_reward);
+  console.log("WEEKLY QUEST COMPLETED: " + req.params.id);
   res.json({ success: true, xpGained: quest.xp_reward });
 });
 
 app.post("/api/weekly-quests/:id/uncomplete", (req, res) => {
+  console.log("RECEIVED WEEKLY UNCOMPLETE REQUEST FOR QUEST: " + req.params.id);
   const quest = db.prepare("SELECT * FROM weekly_quests WHERE id = ?").get(req.params.id);
   db.prepare("UPDATE weekly_quests SET completed = 0 WHERE id = ?").run(req.params.id);
   db.prepare("UPDATE player SET xp = xp - ? WHERE id = 1").run(quest.xp_reward);
+  console.log("WEEKLY QUEST UNCOMPLETED: " + req.params.id);
   res.json({ success: true, xpLost: quest.xp_reward });
 });
 

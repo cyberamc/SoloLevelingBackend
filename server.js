@@ -92,38 +92,26 @@ function generateDailyQuests() {
 
 function generateWeeklyQuests() {
   const today = db.prepare("SELECT date('now', 'localtime') as today").get().today;
-  
-  const sundayResult = db.prepare("SELECT date('now', 'localtime', '-' || CAST(strftime('%w', 'now', 'localtime') AS TEXT) || ' days') as sunday").get();
-  const week_start_date = sundayResult.sunday;
-  
-  const todayWeekdayResult = db.prepare("SELECT CAST(strftime('%w', 'now', 'localtime') AS INTEGER) as dayOfWeek").get();
-  const todayWeekday = todayWeekdayResult.dayOfWeek;
-  
-  // Delete quests from old weeks
-  db.prepare("DELETE FROM weekly_quests WHERE week_start_date < ?").run(week_start_date);
-  
-  // Reset today's weekday quests if their created_date is before today (their reset day)
-  const resetResult = db.prepare("UPDATE weekly_quests SET completed = 0, created_date = ? WHERE weekday = ? AND week_start_date = ? AND created_date < ?")
-    .run(today, todayWeekday, week_start_date, today);
-  
+  const todayWeekday = db.prepare("SELECT CAST(strftime('%w', 'now', 'localtime') AS INTEGER) as dayOfWeek").get().dayOfWeek;
+
+  // Ensure exactly one persistent row per template (no weekly wipe)
+  const templates = db.prepare("SELECT * FROM weekly_quest_templates").all();
+  const insert = db.prepare("INSERT INTO weekly_quests (template_id, title, weekday, category, xp_reward, created_date, optional) VALUES (?, ?, ?, ?, ?, ?, ?)");
+  templates.forEach(t => {
+    const exists = db.prepare("SELECT COUNT(*) as count FROM weekly_quests WHERE template_id = ?").get(t.id);
+    if (exists.count === 0) {
+      insert.run(t.id, t.title, t.weekday, t.category, t.xp_reward, today, t.optional);
+    }
+  });
+
+  // Reset each quest ONLY on its own weekday, starting a fresh 7-day window. Completions persist otherwise.
+  const resetResult = db.prepare("UPDATE weekly_quests SET completed = 0, created_date = ? WHERE weekday = ? AND created_date < ?")
+    .run(today, todayWeekday, today);
+
   if (resetResult.changes > 0) {
     console.log("Reset " + resetResult.changes + " weekly quests for weekday " + todayWeekday);
   }
-  
-  for (let weekday = 0; weekday <= 6; weekday++) {
-    const existing = db.prepare("SELECT COUNT(*) as count FROM weekly_quests WHERE week_start_date = ? AND weekday = ?").get(week_start_date, weekday);
-    
-    if (existing.count === 0) {
-      const templates = db.prepare("SELECT * FROM weekly_quest_templates WHERE weekday = ?").all(weekday);
-      const insert = db.prepare("INSERT INTO weekly_quests (template_id, title, weekday, category, xp_reward, created_date, optional, week_start_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
-      
-      templates.forEach(t => {
-        insert.run(t.id, t.title, t.weekday, t.category, t.xp_reward, today, t.optional, week_start_date);
-      });
-    }
-  }
 }
-
 function startMidnightScheduler() {
   setInterval(() => {
     const now = new Date();
@@ -147,11 +135,8 @@ app.get("/api/quests", (req, res) => {
   
   const today = db.prepare("SELECT date('now', 'localtime') as today").get().today;
   
-  const sundayResult = db.prepare("SELECT date('now', 'localtime', '-' || CAST(strftime('%w', 'now', 'localtime') AS TEXT) || ' days') as sunday").get();
-  const week_start_date = sundayResult.sunday;
-  
-  const daily = db.prepare("SELECT * FROM quests WHERE created_date = ? AND type = 'daily' ORDER BY id").all(today);
-  const weekly = db.prepare("SELECT * FROM weekly_quests WHERE week_start_date = ? ORDER BY weekday, optional, completed").all(week_start_date);
+const daily = db.prepare("SELECT * FROM quests WHERE created_date = ? AND type = 'daily' ORDER BY id").all(today);
+  const weekly = db.prepare("SELECT * FROM weekly_quests ORDER BY weekday, optional, completed").all();
   const req_weekly = weekly.filter(q => !q.optional);
   
   res.json({
@@ -166,19 +151,12 @@ app.get("/api/quests", (req, res) => {
 
 app.get("/api/weekly-quests/all", (req, res) => {
   generateWeeklyQuests();
-  
-  const todayWeekdayResult = db.prepare("SELECT CAST(strftime('%w', 'now', 'localtime') AS INTEGER) as dayOfWeek").get();
-  const todayWeekday = todayWeekdayResult.dayOfWeek;
-  
-  const sundayResult = db.prepare("SELECT date('now', 'localtime', '-' || CAST(strftime('%w', 'now', 'localtime') AS TEXT) || ' days') as sunday").get();
-  const week_start_date = sundayResult.sunday;
-  
-  const all = db.prepare("SELECT wq.* FROM weekly_quests wq WHERE wq.week_start_date = ? ORDER BY wq.weekday, wq.optional, wq.completed").all(week_start_date);
+  const todayWeekday = db.prepare("SELECT CAST(strftime('%w', 'now', 'localtime') AS INTEGER) as dayOfWeek").get().dayOfWeek;
+  const all = db.prepare("SELECT wq.* FROM weekly_quests wq ORDER BY wq.weekday, wq.optional, wq.completed").all();
   const withOverdue = all.map(q => ({
     ...q,
-    isOverdue: q.completed === 0 && q.optional === 0 && q.weekday < todayWeekday ? 1 : 0
+    isOverdue: q.completed === 0 && q.optional === 0 && q.weekday !== todayWeekday ? 1 : 0
   }));
-  
   res.json(withOverdue);
 });
 

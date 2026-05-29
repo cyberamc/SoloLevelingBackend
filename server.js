@@ -53,10 +53,9 @@ function getPlayer() {
 }
 
 function generateDailyQuests() {
-  const today = new Date().toISOString().split('T')[0];
+  const today = db.prepare("SELECT date('now', 'localtime') as today").get().today;
   
   db.prepare("DELETE FROM quests WHERE type = 'daily' AND created_date < ?").run(today);
-  db.prepare("UPDATE quests SET completed = 0 WHERE type = 'daily' AND created_date = ? AND optional = 0").run(today);
   
   const existing = db.prepare("SELECT COUNT(*) as count FROM quests WHERE created_date = ? AND type = 'daily'").get(today);
   
@@ -92,7 +91,7 @@ function generateDailyQuests() {
 }
 
 function generateWeeklyQuests() {
-  const today = new Date().toISOString().split('T')[0];
+  const today = db.prepare("SELECT date('now', 'localtime') as today").get().today;
   
   const sundayResult = db.prepare("SELECT date('now', 'localtime', '-' || CAST(strftime('%w', 'now', 'localtime') AS TEXT) || ' days') as sunday").get();
   const week_start_date = sundayResult.sunday;
@@ -146,7 +145,7 @@ app.get("/api/quests", (req, res) => {
   generateDailyQuests();
   generateWeeklyQuests();
   
-  const today = new Date().toISOString().split('T')[0];
+  const today = db.prepare("SELECT date('now', 'localtime') as today").get().today;
   
   const sundayResult = db.prepare("SELECT date('now', 'localtime', '-' || CAST(strftime('%w', 'now', 'localtime') AS TEXT) || ' days') as sunday").get();
   const week_start_date = sundayResult.sunday;
@@ -177,7 +176,7 @@ app.get("/api/weekly-quests/all", (req, res) => {
   const all = db.prepare("SELECT wq.* FROM weekly_quests wq WHERE wq.week_start_date = ? ORDER BY wq.weekday, wq.optional, wq.completed").all(week_start_date);
   const withOverdue = all.map(q => ({
     ...q,
-    isOverdue: q.completed === 0 && q.optional === 0 && (q.weekday > todayWeekday || (q.weekday === 0 && todayWeekday !== 0)) ? 1 : 0
+    isOverdue: q.completed === 0 && q.optional === 0 && q.weekday < todayWeekday ? 1 : 0
   }));
   
   res.json(withOverdue);

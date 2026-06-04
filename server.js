@@ -11,7 +11,7 @@ app.use(cors());
 app.use(express.json());
 
 // ─── Hevy Config ──────────────────────────────────────────────────────────────
-const HEVY_API_KEY = "YOUR_HEVY_API_KEY_HERE"; // hevy.com/settings?developer
+const HEVY_API_KEY = "d4b36ead-42d1-4916-9055-3ddb36d123f1"; // hevy.com/settings?developer
 const KG_TO_LBS = 2.20462;
 
 // ─── Player / Level Logic ─────────────────────────────────────────────────────

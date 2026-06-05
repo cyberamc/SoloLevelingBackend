@@ -106,7 +106,8 @@ function generateWeeklyQuests() {
   templates.forEach(t => {
     const exists = db.prepare("SELECT COUNT(*) as count FROM weekly_quests WHERE template_id = ?").get(t.id);
     if (exists.count === 0) {
-      insert.run(t.id, t.title, t.weekday, t.category, t.xp_reward, today, t.optional);
+      const questTitle = t.time ? t.title + " @ " + t.time : t.title;
+      insert.run(t.id, questTitle, t.weekday, t.category, t.xp_reward, today, t.optional);
     }
   });
 

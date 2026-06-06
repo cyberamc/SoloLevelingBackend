@@ -189,7 +189,7 @@ function getStrengthInfo(title, oneRM) {
   return { level: "Elite", percentile: 90 };
 }
 
-// ─── Existing Quest Endpoints ─────────────────────────────────────────────────
+// ─── Quest Endpoints ──────────────────────────────────────────────────────────
 app.get("/api/player", (req, res) => {
   res.json(getPlayer());
 });
@@ -271,7 +271,7 @@ app.post("/api/weekly-quests/:id/uncomplete", (req, res) => {
   res.json({ success: true, xpLost: quest.xp_reward });
 });
 
-// ─── Gym Helpers ─────────────────────────────────────────────────────────────
+// ─── Gym Helpers ──────────────────────────────────────────────────────────────
 async function buildExerciseMap() {
   const [p1, p2] = await Promise.all([
     hevyGet("/v1/workouts?page=1&pageSize=10"),
@@ -360,7 +360,6 @@ app.get("/api/gym/routines", async (req, res) => {
       ...(r1.routines || []), ...(r2.routines || []), ...(r3.routines || []),
       ...(r4.routines || []), ...(r5.routines || []), ...(r6.routines || []),
     ];
-    // Detect current week from the most recent workout that has a Week number in its title
     let currentWeek = 0;
     for (const w of workouts.slice(0, 5)) {
       const m = (w.title || "").match(/Week\s+(\d+)/i);
@@ -373,7 +372,6 @@ app.get("/api/gym/routines", async (req, res) => {
           const m = (r.title || "").match(/Week\s+(\d+)/i);
           return m ? parseInt(m[1]) === currentWeek : false;
         }
-        // Fallback: show any routine used in recent workouts
         return recentRoutineIds.has(r.id);
       })
       .map(r => ({
@@ -413,6 +411,63 @@ app.get("/api/gym/history/:exerciseId", async (req, res) => {
     console.error("Hevy /history error:", e.message);
     res.status(500).json({ error: e.message });
   }
+});
+
+// ─── Food Inventory ───────────────────────────────────────────────────────────
+function initFoodInventory() {
+  db.prepare(`
+    CREATE TABLE IF NOT EXISTS food_inventory (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      source TEXT NOT NULL,
+      level INTEGER NOT NULL DEFAULT 3
+    )
+  `).run();
+
+  const count = db.prepare("SELECT COUNT(*) as count FROM food_inventory").get();
+  if (count.count === 0) {
+    const insert = db.prepare("INSERT INTO food_inventory (name, source, level) VALUES (?, ?, 3)");
+    const items = [
+      ["Member's Mark Natural Pecan Halves, 32 oz.", "Sam's Club"],
+      ["Member's Mark 80/20 Ground Beef Roll, Vacuum Pack", "Sam's Club"],
+      ["Member's Mark Boneless and Skinless Chicken Breast", "Sam's Club"],
+      ["Member's Mark USDA Choice Angus Beef Sirloin Tip Steak, Thin Sliced", "Sam's Club"],
+      ["Fresh Large Grade AA Eggs 5 dozen", "Sam's Club"],
+      ["Multi Bell Sweet Peppers, 6 ct.", "Sam's Club"],
+      ["Yellow Onions, 10 lbs.", "Sam's Club"],
+      ["Member's Mark Minced Garlic, 48 oz.", "Sam's Club"],
+      ["Member's Mark Mexican Style Finely Shredded Cheese 2 pk.", "Sam's Club"],
+      ["Member's Mark Pure Olive Oil, 101 fl. oz.", "Sam's Club"],
+      ["Member's Mark Unsalted Sweet Cream Butter Sticks, 4 oz., 16 ct.", "Sam's Club"],
+      ["Hershey's Cocoa 100% Cacao Natural Unsweetened, 23 oz.", "Sam's Club"],
+      ["Member's Mark Thyme Leaves, 8.25 oz.", "Sam's Club"],
+      ["Whole White Mushrooms 24 oz.", "Sam's Club"],
+      ["Member's Mark 91% Isopropyl Alcohol, 32 fl. oz., 2 pk.", "Sam's Club"],
+      ["Member's Mark Restaurant Coarse Black Pepper, 18 oz.", "Sam's Club"],
+      ["Member's Mark Mediterranean Sea Salt Grinder, 14.9 oz.", "Sam's Club"],
+      ["Member's Mark Himalayan Pink Salt, 38 oz.", "Sam's Club"],
+      ["Swerve Ultimate Sugar Replacement Sweetener", "Amazon"],
+    ];
+    items.forEach(([name, source]) => insert.run(name, source));
+    console.log("Food inventory seeded with " + items.length + " items");
+  }
+}
+
+initFoodInventory();
+
+app.get("/api/food-inventory", (req, res) => {
+  const items = db.prepare("SELECT * FROM food_inventory ORDER BY level ASC, name ASC").all();
+  res.json(items);
+});
+
+app.patch("/api/food-inventory/:id", (req, res) => {
+  const { level } = req.body;
+  if (level === undefined || level < 0 || level > 3) {
+    return res.status(400).json({ error: "level must be 0-3" });
+  }
+  db.prepare("UPDATE food_inventory SET level = ? WHERE id = ?").run(level, req.params.id);
+  const item = db.prepare("SELECT * FROM food_inventory WHERE id = ?").get(req.params.id);
+  res.json(item);
 });
 
 // ─── Start ────────────────────────────────────────────────────────────────────

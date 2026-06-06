@@ -11,7 +11,7 @@ app.use(cors());
 app.use(express.json());
 
 // ─── Hevy Config ──────────────────────────────────────────────────────────────
-const HEVY_API_KEY = "d4b36ead-42d1-4916-9055-3ddb36d123f1"; // hevy.com/settings?developer
+const HEVY_API_KEY = "d4b36ead-42d1-4916-9055-3ddb36d123f1";
 const KG_TO_LBS = 2.20462;
 
 // ─── Player / Level Logic ─────────────────────────────────────────────────────
@@ -61,36 +61,26 @@ function getPlayer() {
 // ─── Quest Generation ─────────────────────────────────────────────────────────
 function generateDailyQuests() {
   const today = db.prepare("SELECT date('now', 'localtime') as today").get().today;
-
   db.prepare("DELETE FROM quests WHERE type = 'daily' AND created_date < ?").run(today);
-
   const existing = db.prepare("SELECT COUNT(*) as count FROM quests WHERE created_date = ? AND type = 'daily'").get(today);
-
   if (existing.count === 0) {
     const dayResult = db.prepare("SELECT CAST(strftime('%w', ?) AS INTEGER) as dayOfWeek").get(today);
     const dayOfWeek = dayResult.dayOfWeek;
     const isDeliveryDay = dayOfWeek === 2 || dayOfWeek === 3;
-
     let templates;
     if (isDeliveryDay) {
       templates = db.prepare("SELECT * FROM daily_quest_templates WHERE (tuesday_time IS NOT NULL OR wednesday_time IS NOT NULL) AND time IS NULL").all();
     } else {
       templates = db.prepare("SELECT * FROM daily_quest_templates WHERE time IS NOT NULL AND tuesday_time IS NULL AND wednesday_time IS NULL").all();
     }
-
     const insert = db.prepare("INSERT INTO quests (title, type, category, xp_reward, created_date, optional) VALUES (?, 'daily', ?, ?, ?, ?)");
     templates.forEach(t => {
       let time = null;
-      if (dayOfWeek === 2 && t.tuesday_time) {
-        time = t.tuesday_time;
-      } else if (dayOfWeek === 3 && t.wednesday_time) {
-        time = t.wednesday_time;
-      } else if (t.time) {
-        time = t.time;
-      }
+      if (dayOfWeek === 2 && t.tuesday_time) time = t.tuesday_time;
+      else if (dayOfWeek === 3 && t.wednesday_time) time = t.wednesday_time;
+      else if (t.time) time = t.time;
       if (time) {
-        const title = t.title + " @ " + time;
-        insert.run(title, t.category, t.xp_reward, today, t.optional);
+        insert.run(t.title + " @ " + time, t.category, t.xp_reward, today, t.optional);
       }
     });
     console.log("Daily quests generated for " + today);
@@ -100,7 +90,6 @@ function generateDailyQuests() {
 function generateWeeklyQuests() {
   const today = db.prepare("SELECT date('now', 'localtime') as today").get().today;
   const todayWeekday = db.prepare("SELECT CAST(strftime('%w', 'now', 'localtime') AS INTEGER) as dayOfWeek").get().dayOfWeek;
-
   const templates = db.prepare("SELECT * FROM weekly_quest_templates").all();
   const insert = db.prepare("INSERT INTO weekly_quests (template_id, title, weekday, category, xp_reward, created_date, optional) VALUES (?, ?, ?, ?, ?, ?, ?)");
   templates.forEach(t => {
@@ -110,10 +99,8 @@ function generateWeeklyQuests() {
       insert.run(t.id, questTitle, t.weekday, t.category, t.xp_reward, today, t.optional);
     }
   });
-
   const resetResult = db.prepare("UPDATE weekly_quests SET completed = 0, created_date = ? WHERE weekday = ? AND created_date < ?")
     .run(today, todayWeekday, today);
-
   if (resetResult.changes > 0) {
     console.log("Reset " + resetResult.changes + " weekly quests for weekday " + todayWeekday);
   }
@@ -156,15 +143,14 @@ function epley1RM(weightLbs, reps) {
   return Math.round(weightLbs * (1 + reps / 30));
 }
 
-// Standards for ~191 lb male [beginner, novice, intermediate, advanced, elite] in lbs 1RM
 const STRENGTH_STANDARDS = {
-  "Bench Press (Barbell)":       [100, 145, 200, 275, 360],
-  "Squat (Barbell)":             [125, 190, 270, 370, 480],
-  "Deadlift (Barbell)":          [150, 225, 325, 445, 580],
-  "Overhead Press (Barbell)":    [65,  95,  135, 185, 245],
-  "Bent Over Row (Barbell)":     [85,  130, 185, 255, 335],
-  "Romanian Deadlift":           [120, 185, 265, 365, 475],
-  "Incline Bench Press (Barbell)": [85, 125, 175, 240, 315],
+  "Bench Press (Barbell)":         [100, 145, 200, 275, 360],
+  "Squat (Barbell)":               [125, 190, 270, 370, 480],
+  "Deadlift (Barbell)":            [150, 225, 325, 445, 580],
+  "Overhead Press (Barbell)":      [65,  95,  135, 185, 245],
+  "Bent Over Row (Barbell)":       [85,  130, 185, 255, 335],
+  "Romanian Deadlift":             [120, 185, 265, 365, 475],
+  "Incline Bench Press (Barbell)": [85,  125, 175, 240, 315],
 };
 
 function getStrengthInfo(title, oneRM) {
@@ -197,13 +183,10 @@ app.get("/api/player", (req, res) => {
 app.get("/api/quests", (req, res) => {
   generateDailyQuests();
   generateWeeklyQuests();
-
   const today = db.prepare("SELECT date('now', 'localtime') as today").get().today;
-
   const daily = db.prepare("SELECT * FROM quests WHERE created_date = ? AND type = 'daily' ORDER BY id").all(today);
   const weekly = db.prepare("SELECT * FROM weekly_quests ORDER BY weekday, optional, completed").all();
   const req_weekly = weekly.filter(q => !q.optional);
-
   res.json({
     dailyQuests: daily,
     weeklyQuests: weekly,
@@ -226,48 +209,36 @@ app.get("/api/weekly-quests/all", (req, res) => {
 });
 
 app.post("/api/quests/:id/complete", (req, res) => {
-  console.log("RECEIVED COMPLETE REQUEST FOR QUEST: " + req.params.id);
   const quest = db.prepare("SELECT * FROM quests WHERE id = ?").get(req.params.id);
   db.prepare("UPDATE quests SET completed = 1 WHERE id = ?").run(req.params.id);
   db.prepare("UPDATE player SET xp = xp + ? WHERE id = 1").run(quest.xp_reward);
-
   if (quest.title && quest.title.includes("You Didn't Fap Today")) {
     db.prepare("UPDATE player SET nofap_streak = nofap_streak + 1 WHERE id = 1").run();
   }
-
-  console.log("QUEST COMPLETED: " + req.params.id);
   res.json({ success: true, xpGained: quest.xp_reward });
 });
 
 app.post("/api/quests/:id/uncomplete", (req, res) => {
-  console.log("RECEIVED UNCOMPLETE REQUEST FOR QUEST: " + req.params.id);
   const quest = db.prepare("SELECT * FROM quests WHERE id = ?").get(req.params.id);
   db.prepare("UPDATE quests SET completed = 0 WHERE id = ?").run(req.params.id);
   db.prepare("UPDATE player SET xp = xp - ? WHERE id = 1").run(quest.xp_reward);
-
   if (quest.title && quest.title.includes("You Didn't Fap Today")) {
     db.prepare("UPDATE player SET nofap_streak = MAX(0, nofap_streak - 1) WHERE id = 1").run();
   }
-
-  console.log("QUEST UNCOMPLETED: " + req.params.id);
   res.json({ success: true, xpLost: quest.xp_reward });
 });
 
 app.post("/api/weekly-quests/:id/complete", (req, res) => {
-  console.log("RECEIVED WEEKLY COMPLETE REQUEST FOR QUEST: " + req.params.id);
   const quest = db.prepare("SELECT * FROM weekly_quests WHERE id = ?").get(req.params.id);
   db.prepare("UPDATE weekly_quests SET completed = 1 WHERE id = ?").run(req.params.id);
   db.prepare("UPDATE player SET xp = xp + ? WHERE id = 1").run(quest.xp_reward);
-  console.log("WEEKLY QUEST COMPLETED: " + req.params.id);
   res.json({ success: true, xpGained: quest.xp_reward });
 });
 
 app.post("/api/weekly-quests/:id/uncomplete", (req, res) => {
-  console.log("RECEIVED WEEKLY UNCOMPLETE REQUEST FOR QUEST: " + req.params.id);
   const quest = db.prepare("SELECT * FROM weekly_quests WHERE id = ?").get(req.params.id);
   db.prepare("UPDATE weekly_quests SET completed = 0 WHERE id = ?").run(req.params.id);
   db.prepare("UPDATE player SET xp = xp - ? WHERE id = 1").run(quest.xp_reward);
-  console.log("WEEKLY QUEST UNCOMPLETED: " + req.params.id);
   res.json({ success: true, xpLost: quest.xp_reward });
 });
 
@@ -365,7 +336,6 @@ app.get("/api/gym/routines", async (req, res) => {
       const m = (w.title || "").match(/Week\s+(\d+)/i);
       if (m) { currentWeek = parseInt(m[1]); break; }
     }
-
     const result = routines
       .filter(r => {
         if (currentWeek > 0) {
@@ -381,7 +351,6 @@ app.get("/api/gym/routines", async (req, res) => {
           buildExerciseStats(ex.exercise_template_id, ex.title, exerciseMap)
         ),
       }));
-
     res.json(result);
   } catch (e) {
     console.error("Hevy /routines error:", e.message);
@@ -423,7 +392,6 @@ function initFoodInventory() {
       level INTEGER NOT NULL DEFAULT 3
     )
   `).run();
-
   const count = db.prepare("SELECT COUNT(*) as count FROM food_inventory").get();
   if (count.count === 0) {
     const insert = db.prepare("INSERT INTO food_inventory (name, source, level) VALUES (?, ?, 3)");
@@ -453,7 +421,51 @@ function initFoodInventory() {
   }
 }
 
+// ─── Household Inventory ──────────────────────────────────────────────────────
+function initHouseholdInventory() {
+  db.prepare(`
+    CREATE TABLE IF NOT EXISTS household_inventory (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      level INTEGER NOT NULL DEFAULT 3
+    )
+  `).run();
+  const count = db.prepare("SELECT COUNT(*) as count FROM household_inventory").get();
+  if (count.count === 0) {
+    const insert = db.prepare("INSERT INTO household_inventory (name, level) VALUES (?, 3)");
+    const items = [
+      "NIVEA MEN Maximum Hydration Body Lotion",
+      "Nutricost Electrolyte Complex Powder (120 Servings)",
+      "Protein Powder (4 LBS)",
+      "Blue Buffalo Dry Adult Dog Food 4.15 lb Bag",
+      "Body Wash",
+      "OxiClean Odor Blasters & Stain Remover",
+      "Tide Pods (112 Pods)",
+      "Kleenex (8 Pack)",
+      "Brawny Tear-A-Square Paper Towels (12 Rolls)",
+      "Dove Men Deodorant (4 Pack)",
+      "Dryer Sheets",
+      "JOHNNY B. Mode Professional Hair Styling Gel 64 Oz",
+      "Pantene Shampoo and Conditioner Set",
+      "Scotch-Brite Zero Scratch Scrub Sponges (6 Pack)",
+      "Philips G2 Toothbrush Heads (5 Pack)",
+      "The Pink Stuff Spray (3 Pack)",
+      "GLAD Drawstring Trash Bags (140 Count)",
+      "Q-Tips (2 Pack)",
+      "Hefty Small Trash Bags 4 Gallon (52 Count)",
+      "Toilet Paper",
+      "Blue Buffalo Wet Dog Food 12.5 Oz (12 Pack)",
+      "Pup-Peroni Dog Treats, Prime Rib Flavor, 38 Oz Bag",
+      "Dawn Platinum Plus PowerSuds Liquid Dish Soap, 51.5 oz. Refill",
+      "Hand Soaps (6 Pack)",
+    ];
+    items.forEach(name => insert.run(name));
+    console.log("Household inventory seeded with " + items.length + " items");
+  }
+}
+
 initFoodInventory();
+initHouseholdInventory();
 
 app.get("/api/food-inventory", (req, res) => {
   const items = db.prepare("SELECT * FROM food_inventory ORDER BY level ASC, name ASC").all();
@@ -467,6 +479,21 @@ app.patch("/api/food-inventory/:id", (req, res) => {
   }
   db.prepare("UPDATE food_inventory SET level = ? WHERE id = ?").run(level, req.params.id);
   const item = db.prepare("SELECT * FROM food_inventory WHERE id = ?").get(req.params.id);
+  res.json(item);
+});
+
+app.get("/api/household-inventory", (req, res) => {
+  const items = db.prepare("SELECT * FROM household_inventory ORDER BY level ASC, name ASC").all();
+  res.json(items);
+});
+
+app.patch("/api/household-inventory/:id", (req, res) => {
+  const { level } = req.body;
+  if (level === undefined || level < 0 || level > 3) {
+    return res.status(400).json({ error: "level must be 0-3" });
+  }
+  db.prepare("UPDATE household_inventory SET level = ? WHERE id = ?").run(level, req.params.id);
+  const item = db.prepare("SELECT * FROM household_inventory WHERE id = ?").get(req.params.id);
   res.json(item);
 });
 

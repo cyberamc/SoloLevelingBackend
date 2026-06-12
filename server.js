@@ -106,11 +106,34 @@ function generateWeeklyQuests() {
   }
 }
 
+function checkAndUpdateStreak() {
+  const today = db.prepare("SELECT date('now', 'localtime') as today").get().today;
+  const yesterday = db.prepare("SELECT date('now', 'localtime', '-1 day') as yesterday").get().yesterday;
+  const yesterdayWeekday = db.prepare("SELECT CAST(strftime('%w', 'now', 'localtime', '-1 day') AS INTEGER) as dow").get().dow;
+
+  // Get all daily quests from yesterday
+  const yesterdayQuests = db.prepare("SELECT * FROM quests WHERE created_date = ? AND type = 'daily'").all(yesterday);
+  // Get all required (weekly) quests for yesterday's weekday
+  const yesterdayRequired = db.prepare("SELECT * FROM weekly_quests WHERE weekday = ? AND optional = 0").all(yesterdayWeekday);
+
+  const allDailyDone = yesterdayQuests.length > 0 && yesterdayQuests.every(q => q.completed === 1);
+  const allRequiredDone = yesterdayRequired.length === 0 || yesterdayRequired.every(q => q.completed === 1);
+
+  if (allDailyDone && allRequiredDone) {
+    db.prepare("UPDATE player SET nofap_streak = nofap_streak + 1 WHERE id = 1").run();
+    console.log("Streak incremented — all tasks completed yesterday");
+  } else {
+    db.prepare("UPDATE player SET nofap_streak = 0 WHERE id = 1").run();
+    console.log("Streak reset — tasks not fully completed yesterday");
+  }
+}
+
 function startMidnightScheduler() {
   setInterval(() => {
     const now = new Date();
     if (now.getHours() === 0 && now.getMinutes() === 0) {
       console.log("Midnight reset triggered at " + now.toISOString());
+      checkAndUpdateStreak();
       generateDailyQuests();
       generateWeeklyQuests();
     }
@@ -212,9 +235,6 @@ app.post("/api/quests/:id/complete", (req, res) => {
   const quest = db.prepare("SELECT * FROM quests WHERE id = ?").get(req.params.id);
   db.prepare("UPDATE quests SET completed = 1 WHERE id = ?").run(req.params.id);
   db.prepare("UPDATE player SET xp = xp + ? WHERE id = 1").run(quest.xp_reward);
-  if (quest.title && quest.title.includes("You Didn't Fap Today")) {
-    db.prepare("UPDATE player SET nofap_streak = nofap_streak + 1 WHERE id = 1").run();
-  }
   res.json({ success: true, xpGained: quest.xp_reward });
 });
 
@@ -222,9 +242,6 @@ app.post("/api/quests/:id/uncomplete", (req, res) => {
   const quest = db.prepare("SELECT * FROM quests WHERE id = ?").get(req.params.id);
   db.prepare("UPDATE quests SET completed = 0 WHERE id = ?").run(req.params.id);
   db.prepare("UPDATE player SET xp = xp - ? WHERE id = 1").run(quest.xp_reward);
-  if (quest.title && quest.title.includes("You Didn't Fap Today")) {
-    db.prepare("UPDATE player SET nofap_streak = MAX(0, nofap_streak - 1) WHERE id = 1").run();
-  }
   res.json({ success: true, xpLost: quest.xp_reward });
 });
 
@@ -523,6 +540,83 @@ app.patch("/api/supplement-inventory/:id", (req, res) => {
   db.prepare("UPDATE supplement_inventory SET level = ? WHERE id = ?").run(level, req.params.id);
   const item = db.prepare("SELECT * FROM supplement_inventory WHERE id = ?").get(req.params.id);
   res.json(item);
+});
+
+// ─── Delivery Tracker ─────────────────────────────────────────────────────────
+function initDeliveryTracker() {
+  db.prepare(`
+    CREATE TABLE IF NOT EXISTS delivery_weeks (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      week_start TEXT NOT NULL UNIQUE,
+      tue_delivered INTEGER NOT NULL DEFAULT 0,
+      tue_duplicates INTEGER NOT NULL DEFAULT 0,
+      tue_undeliverable INTEGER NOT NULL DEFAULT 0,
+      wed_delivered INTEGER NOT NULL DEFAULT 0,
+      wed_duplicates INTEGER NOT NULL DEFAULT 0,
+      wed_undeliverable INTEGER NOT NULL DEFAULT 0
+    )
+  `).run();
+}
+
+initDeliveryTracker();
+
+function getWeekStart(dateStr) {
+  const d = new Date(dateStr + 'T12:00:00');
+  const day = d.getDay();
+  const diff = d.getDate() - day;
+  const sunday = new Date(d);
+  sunday.setDate(diff);
+  return sunday.toISOString().split('T')[0];
+}
+
+function ensureRecentWeeks() {
+  const todayStr = db.prepare("SELECT date('now', 'localtime') as today").get().today;
+  for (let i = 2; i >= 0; i--) {
+    const d = new Date(todayStr + 'T12:00:00');
+    d.setDate(d.getDate() - (i * 7));
+    const ds = d.toISOString().split('T')[0];
+    const weekStart = getWeekStart(ds);
+    const exists = db.prepare("SELECT COUNT(*) as count FROM delivery_weeks WHERE week_start = ?").get(weekStart);
+    if (exists.count === 0) {
+      db.prepare("INSERT INTO delivery_weeks (week_start) VALUES (?)").run(weekStart);
+    }
+  }
+  return db.prepare("SELECT * FROM delivery_weeks ORDER BY week_start DESC LIMIT 3").all().reverse();
+}
+
+app.get("/api/delivery-weeks", (req, res) => {
+  const weeks = ensureRecentWeeks();
+  res.json(weeks);
+});
+
+app.patch("/api/delivery-weeks/:id", (req, res) => {
+  const { tue_delivered, tue_duplicates, tue_undeliverable, wed_delivered, wed_duplicates, wed_undeliverable } = req.body;
+  const week = db.prepare("SELECT * FROM delivery_weeks WHERE id = ?").get(req.params.id);
+  if (!week) return res.status(404).json({ error: "Week not found" });
+  db.prepare(`
+    UPDATE delivery_weeks SET
+      tue_delivered = ?,
+      tue_duplicates = ?,
+      tue_undeliverable = ?,
+      wed_delivered = ?,
+      wed_duplicates = ?,
+      wed_undeliverable = ?
+    WHERE id = ?
+  `).run(
+    tue_delivered ?? week.tue_delivered,
+    tue_duplicates ?? week.tue_duplicates,
+    tue_undeliverable ?? week.tue_undeliverable,
+    wed_delivered ?? week.wed_delivered,
+    wed_duplicates ?? week.wed_duplicates,
+    wed_undeliverable ?? week.wed_undeliverable,
+    req.params.id
+  );
+  res.json(db.prepare("SELECT * FROM delivery_weeks WHERE id = ?").get(req.params.id));
+});
+
+app.delete("/api/delivery-weeks/:id", (req, res) => {
+  db.prepare("DELETE FROM delivery_weeks WHERE id = ?").run(req.params.id);
+  res.json({ success: true });
 });
 
 // ─── Start ────────────────────────────────────────────────────────────────────

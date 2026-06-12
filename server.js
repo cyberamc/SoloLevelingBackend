@@ -542,6 +542,243 @@ app.patch("/api/supplement-inventory/:id", (req, res) => {
   res.json(item);
 });
 
+// ─── Bookkeeping ──────────────────────────────────────────────────────────────
+
+const FIXED_INCOME = {
+  'Check 1': 590,
+  'Check 2': 581,
+  'Check 3': 587,
+  'Check 4': 578,
+  'Plasma': 520
+};
+
+const GROUP_ORDER = [
+  'Check 1', 'Check 2', 'Check 3', 'Check 4', 'Plasma',
+  'SpeedX Check 1', 'SpeedX Check 2', 'SpeedX Check 3', 'SpeedX Check 4',
+  'People', 'Subscriptions'
+];
+
+app.get("/api/bookkeeping", (req, res) => {
+  const months = db.prepare("SELECT * FROM bookkeeping_months ORDER BY month DESC").all();
+  res.json(months);
+});
+
+app.get("/api/bookkeeping/:monthId", (req, res) => {
+  const month = db.prepare("SELECT * FROM bookkeeping_months WHERE id = ?").get(req.params.monthId);
+  if (!month) return res.status(404).json({ error: "Month not found" });
+  const bills = db.prepare("SELECT * FROM bookkeeping_bills WHERE month_id = ? ORDER BY sort_order").all(req.params.monthId);
+
+  // Get SpeedX amount from delivery tracker for this month
+  const monthStr = month.month; // e.g. '2026-06'
+  const weekStart = monthStr + '-01';
+  const weekEnd = monthStr + '-30';
+  const deliveryWeeks = db.prepare("SELECT * FROM delivery_weeks WHERE week_start >= ? AND week_start <= ?").all(weekStart, weekEnd);
+  let speedxTotal = 0;
+  deliveryWeeks.forEach(w => {
+    const tueBillable = Math.max(0, w.tue_delivered - w.tue_duplicates - w.tue_undeliverable);
+    const wedBillable = Math.max(0, w.wed_delivered - w.wed_duplicates - w.wed_undeliverable);
+    speedxTotal += (tueBillable + wedBillable) * 1.60;
+  });
+
+  const groups = {};
+  bills.forEach(b => {
+    if (!groups[b.group_name]) groups[b.group_name] = [];
+    groups[b.group_name].push(b);
+  });
+
+  res.json({ month, bills, groups, speedxTotal: Math.round(speedxTotal * 100) / 100, fixedIncome: FIXED_INCOME });
+});
+
+app.post("/api/bookkeeping", (req, res) => {
+  const { month } = req.body;
+  if (!month) return res.status(400).json({ error: "month required" });
+  try {
+    db.prepare("INSERT INTO bookkeeping_months (month, speedx_amount) VALUES (?, 0)").run(month);
+    const newMonth = db.prepare("SELECT * FROM bookkeeping_months WHERE month = ?").get(month);
+    res.json(newMonth);
+  } catch (e) {
+    res.status(400).json({ error: "Month already exists" });
+  }
+});
+
+app.patch("/api/bookkeeping/bills/:id", (req, res) => {
+  const { status, amount } = req.body;
+  const bill = db.prepare("SELECT * FROM bookkeeping_bills WHERE id = ?").get(req.params.id);
+  if (!bill) return res.status(404).json({ error: "Bill not found" });
+  db.prepare("UPDATE bookkeeping_bills SET status = ?, amount = ? WHERE id = ?")
+    .run(status ?? bill.status, amount ?? bill.amount, req.params.id);
+  res.json(db.prepare("SELECT * FROM bookkeeping_bills WHERE id = ?").get(req.params.id));
+});
+
+// ─── Bookkeeping Web UI ───────────────────────────────────────────────────────
+app.get("/bookkeeping", (req, res) => {
+  const months = db.prepare("SELECT * FROM bookkeeping_months ORDER BY month DESC").all();
+  const currentMonth = months[0];
+  if (!currentMonth) return res.send("<h1>No months found</h1>");
+
+  const bills = db.prepare("SELECT * FROM bookkeeping_bills WHERE month_id = ? ORDER BY sort_order").all(currentMonth.id);
+  const deliveryWeeks = db.prepare("SELECT * FROM delivery_weeks").all();
+  let speedxTotal = 0;
+  deliveryWeeks.forEach(w => {
+    const tueBillable = Math.max(0, w.tue_delivered - w.tue_duplicates - w.tue_undeliverable);
+    const wedBillable = Math.max(0, w.wed_delivered - w.wed_duplicates - w.wed_undeliverable);
+    speedxTotal += (tueBillable + wedBillable) * 1.60;
+  });
+  speedxTotal = Math.round(speedxTotal * 100) / 100;
+
+  const groups = {};
+  bills.forEach(b => {
+    if (!groups[b.group_name]) groups[b.group_name] = [];
+    groups[b.group_name].push(b);
+  });
+
+  const totalIncome = Object.values(FIXED_INCOME).reduce((a, b) => a + b, 0) + speedxTotal;
+  const totalExpenses = bills.reduce((sum, b) => sum + b.amount, 0);
+  const paidExpenses = bills.filter(b => b.status === 'PAID' || b.status === 'AUTOPAY').reduce((sum, b) => sum + b.amount, 0);
+
+  const statusColors = { 'PAID': '#4CAF50', 'NOT PAID': '#888', 'AUTOPAY': '#D4B84A', 'ON HOLD': '#8B4513' };
+  const statuses = ['NOT PAID', 'PAID', 'AUTOPAY', 'ON HOLD'];
+
+  let html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Bookkeeping — ${currentMonth.month}</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #0a0a1a; color: #ddd; font-family: -apple-system, sans-serif; padding: 16px; }
+  h1 { color: #fff; font-size: 24px; margin-bottom: 4px; }
+  .subtitle { color: #888; font-size: 13px; margin-bottom: 20px; }
+  .summary { display: flex; gap: 12px; margin-bottom: 24px; flex-wrap: wrap; }
+  .summary-box { background: #12122a; border-radius: 8px; padding: 14px 20px; flex: 1; min-width: 140px; }
+  .summary-box .label { font-size: 11px; color: #888; margin-bottom: 4px; }
+  .summary-box .value { font-size: 20px; font-weight: bold; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 16px; }
+  .card { background: #12122a; border-radius: 10px; padding: 14px; }
+  .card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+  .card-title { font-size: 14px; font-weight: bold; color: #7b8cde; }
+  .card-income { font-size: 13px; color: #4CAF50; font-weight: bold; }
+  .bill-row { display: flex; align-items: center; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #1a1a2e; gap: 8px; }
+  .bill-row:last-child { border-bottom: none; }
+  .bill-name { font-size: 13px; color: #ccc; flex: 1; }
+  .bill-amount { font-size: 13px; color: #fff; font-weight: 600; min-width: 48px; text-align: right; }
+  .bill-amount input { background: #0e0e1e; border: 1px solid #2a2a3a; border-radius: 4px; color: #fff; font-size: 13px; width: 70px; padding: 4px 6px; text-align: right; }
+  .status-btn { border: none; border-radius: 6px; padding: 4px 10px; font-size: 11px; font-weight: bold; cursor: pointer; white-space: nowrap; }
+  .month-selector { display: flex; gap: 8px; margin-bottom: 20px; flex-wrap: wrap; align-items: center; }
+  .month-btn { background: #12122a; border: 1px solid #2a2a3a; color: #ccc; padding: 6px 14px; border-radius: 6px; cursor: pointer; font-size: 13px; }
+  .month-btn.active { background: #7b8cde; color: #fff; border-color: #7b8cde; }
+  .new-month { background: #1a2a1a; border: 1px solid #2a3a2a; color: #4CAF50; padding: 6px 14px; border-radius: 6px; cursor: pointer; font-size: 13px; }
+  .toast { position: fixed; bottom: 20px; right: 20px; background: #4CAF50; color: #fff; padding: 10px 18px; border-radius: 8px; font-size: 13px; display: none; z-index: 999; }
+  .remaining { font-size: 11px; color: #888; margin-top: 6px; }
+</style>
+</head>
+<body>
+<h1>Bookkeeping</h1>
+<div class="subtitle">Solo Leveling Finance Tracker</div>
+
+<div class="month-selector">
+  ${months.map(m => `<button class="month-btn ${m.id === currentMonth.id ? 'active' : ''}" onclick="location.href='/bookkeeping?month=${m.id}'">${m.month}</button>`).join('')}
+  <button class="new-month" onclick="createMonth()">+ New Month</button>
+</div>
+
+<div class="summary">
+  <div class="summary-box"><div class="label">Total Income</div><div class="value" style="color:#4CAF50">$${totalIncome.toFixed(2)}</div></div>
+  <div class="summary-box"><div class="label">Total Expenses</div><div class="value" style="color:#CF6679">$${totalExpenses.toFixed(2)}</div></div>
+  <div class="summary-box"><div class="label">Paid So Far</div><div class="value" style="color:#D4B84A">$${paidExpenses.toFixed(2)}</div></div>
+  <div class="summary-box"><div class="label">Remaining</div><div class="value" style="color:#7b8cde">$${(totalExpenses - paidExpenses).toFixed(2)}</div></div>
+  <div class="summary-box"><div class="label">SpeedX (Delivery)</div><div class="value" style="color:#4CAF50">$${speedxTotal.toFixed(2)}</div></div>
+</div>
+
+<div class="grid">`;
+
+  const allGroups = [...GROUP_ORDER, ...Object.keys(groups).filter(g => !GROUP_ORDER.includes(g))];
+
+  allGroups.forEach(groupName => {
+    const groupBills = groups[groupName];
+    if (!groupBills) return;
+    const income = FIXED_INCOME[groupName] || (groupName.startsWith('SpeedX') ? speedxTotal / 4 : null);
+    const groupTotal = groupBills.reduce((sum, b) => sum + b.amount, 0);
+    const remaining = income ? income - groupTotal : null;
+
+    html += `<div class="card">
+      <div class="card-header">
+        <div class="card-title">${groupName}</div>
+        ${income ? `<div class="card-income">$${income.toFixed(0)}</div>` : ''}
+      </div>`;
+
+    groupBills.forEach(bill => {
+      const color = statusColors[bill.status] || '#888';
+      html += `<div class="bill-row">
+        <span class="bill-name">${bill.name}</span>
+        <input type="number" value="${bill.amount}" onchange="updateAmount(${bill.id}, this.value)" style="background:#0e0e1e;border:1px solid #2a2a3a;border-radius:4px;color:#fff;font-size:12px;width:65px;padding:3px 5px;text-align:right;">
+        <button class="status-btn" style="background:${color}22;color:${color};border:1px solid ${color}44" onclick="cycleStatus(${bill.id}, this)">${bill.status}</button>
+      </div>`;
+    });
+
+    if (remaining !== null) {
+      html += `<div class="remaining">Remaining after bills: $${remaining.toFixed(2)}</div>`;
+    }
+
+    html += `</div>`;
+  });
+
+  html += `</div>
+<div class="toast" id="toast">Saved ✓</div>
+<script>
+const statuses = ${JSON.stringify(statuses)};
+const statusColors = ${JSON.stringify(statusColors)};
+
+function showToast() {
+  const t = document.getElementById('toast');
+  t.style.display = 'block';
+  setTimeout(() => t.style.display = 'none', 1500);
+}
+
+function cycleStatus(id, btn) {
+  const cur = btn.textContent.trim();
+  const next = statuses[(statuses.indexOf(cur) + 1) % statuses.length];
+  fetch('/api/bookkeeping/bills/' + id, {
+    method: 'PATCH',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({status: next})
+  }).then(() => {
+    btn.textContent = next;
+    const color = statusColors[next];
+    btn.style.background = color + '22';
+    btn.style.color = color;
+    btn.style.borderColor = color + '44';
+    showToast();
+  });
+}
+
+function updateAmount(id, amount) {
+  fetch('/api/bookkeeping/bills/' + id, {
+    method: 'PATCH',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({amount: parseFloat(amount)})
+  }).then(() => showToast());
+}
+
+function createMonth() {
+  const month = prompt('Enter month (YYYY-MM):');
+  if (!month) return;
+  fetch('/api/bookkeeping', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({month})
+  }).then(r => r.json()).then(data => {
+    if (data.error) alert(data.error);
+    else location.href = '/bookkeeping?month=' + data.id;
+  });
+}
+</script>
+</body>
+</html>`;
+
+  res.send(html);
+});
+
 // ─── Delivery Tracker ─────────────────────────────────────────────────────────
 function initDeliveryTracker() {
   db.prepare(`

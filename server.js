@@ -497,6 +497,34 @@ app.patch("/api/household-inventory/:id", (req, res) => {
   res.json(item);
 });
 
+// ─── Supplement Inventory ─────────────────────────────────────────────────────
+function initSupplementInventory() {
+  db.prepare(`
+    CREATE TABLE IF NOT EXISTS supplement_inventory (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      level INTEGER NOT NULL DEFAULT 3
+    )
+  `).run();
+}
+
+initSupplementInventory();
+
+app.get("/api/supplement-inventory", (req, res) => {
+  const items = db.prepare("SELECT * FROM supplement_inventory ORDER BY name ASC").all();
+  res.json(items);
+});
+
+app.patch("/api/supplement-inventory/:id", (req, res) => {
+  const { level } = req.body;
+  if (level === undefined || level < 0 || level > 3) {
+    return res.status(400).json({ error: "level must be 0-3" });
+  }
+  db.prepare("UPDATE supplement_inventory SET level = ? WHERE id = ?").run(level, req.params.id);
+  const item = db.prepare("SELECT * FROM supplement_inventory WHERE id = ?").get(req.params.id);
+  res.json(item);
+});
+
 // ─── Start ────────────────────────────────────────────────────────────────────
 app.listen(3743, "0.0.0.0", () => {
   console.log("Solo Leveling on 3743");

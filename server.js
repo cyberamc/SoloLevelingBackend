@@ -573,12 +573,19 @@ app.patch("/api/supplement-inventory/:id", (req, res) => {
 
 // ─── Bookkeeping ──────────────────────────────────────────────────────────────
 
+// Counts toward Total Income: paychecks + Plasma (+ SpeedX delivery, added separately)
 const FIXED_INCOME = {
   'IT Check 1': 620,
   'IT Check 2': 620,
   'IT Check 3': 620,
   'IT Check 4': 620,
-  'Plasma': 520,
+  'Plasma': 520
+};
+
+// Per-card income labels only — NOT counted in Total Income
+// (People is a reimbursement, Subscriptions is an expense bucket)
+const GROUP_INCOME_LABELS = {
+  ...FIXED_INCOME,
   'People': 135,
   'Subscriptions': 61
 };
@@ -590,6 +597,7 @@ const GROUP_ORDER = [
 ];
 
 app.get("/api/bookkeeping", (req, res) => {
+  ensureCurrentMonth();
   const months = db.prepare("SELECT * FROM bookkeeping_months ORDER BY month DESC").all();
   res.json(months);
 });
@@ -599,17 +607,10 @@ app.get("/api/bookkeeping/:monthId", (req, res) => {
   if (!month) return res.status(404).json({ error: "Month not found" });
   const bills = db.prepare("SELECT * FROM bookkeeping_bills WHERE month_id = ? ORDER BY sort_order").all(req.params.monthId);
 
-  // Get SpeedX amount from delivery tracker for this month
-  const monthStr = month.month; // e.g. '2026-06'
-  const weekStart = monthStr + '-01';
-  const weekEnd = monthStr + '-30';
-  const deliveryWeeks = db.prepare("SELECT * FROM delivery_weeks WHERE week_start >= ? AND week_start <= ?").all(weekStart, weekEnd);
-  let speedxTotal = 0;
-  deliveryWeeks.forEach(w => {
-    const tueBillable = Math.max(0, w.tue_delivered - w.tue_duplicates - w.tue_undeliverable);
-    const wedBillable = Math.max(0, w.wed_delivered - w.wed_duplicates - w.wed_undeliverable);
-    speedxTotal += (tueBillable + wedBillable) * 1.60;
-  });
+  // Ensure this month's delivery weeks exist, then compute SpeedX from them
+  generateDeliveryWeeksForMonth(month.id, month.month);
+  const speedxChecks = speedxByCheckForMonth(month.id);
+  const speedxTotal = Math.round(Object.values(speedxChecks).reduce((a, b) => a + b, 0) * 100) / 100;
 
   const groups = {};
   bills.forEach(b => {
@@ -617,8 +618,54 @@ app.get("/api/bookkeeping/:monthId", (req, res) => {
     groups[b.group_name].push(b);
   });
 
-  res.json({ month, bills, groups, speedxTotal: Math.round(speedxTotal * 100) / 100, fixedIncome: FIXED_INCOME });
+  res.json({ month, bills, groups, speedxTotal, speedxByCheck: speedxChecks, incomeLabels: GROUP_INCOME_LABELS, fixedIncome: FIXED_INCOME });
 });
+
+// Ensure a bookkeeping month exists for the current calendar month (by today's date).
+// Seeds it with the previous month's bills (reset to NOT PAID) and its delivery weeks.
+function ensureCurrentMonth() {
+  const ym = db.prepare("SELECT strftime('%Y-%m', date('now','localtime')) AS ym").get().ym;
+  let month = db.prepare("SELECT * FROM bookkeeping_months WHERE month = ?").get(ym);
+  if (!month) {
+    db.prepare("INSERT INTO bookkeeping_months (month, speedx_amount) VALUES (?, 0)").run(ym);
+    month = db.prepare("SELECT * FROM bookkeeping_months WHERE month = ?").get(ym);
+    seedBillsFromPreviousMonth(month.id, month.month);
+    generateDeliveryWeeksForMonth(month.id, month.month);
+  }
+  return month;
+}
+
+// Delete a month and all its bills + delivery weeks
+app.delete("/api/bookkeeping/:monthId", (req, res) => {
+  const month = db.prepare("SELECT * FROM bookkeeping_months WHERE id = ?").get(req.params.monthId);
+  if (!month) return res.status(404).json({ error: "Month not found" });
+  const tx = db.transaction(() => {
+    db.prepare("DELETE FROM bookkeeping_bills WHERE month_id = ?").run(month.id);
+    db.prepare("DELETE FROM delivery_weeks WHERE month_id = ?").run(month.id);
+    db.prepare("DELETE FROM bookkeeping_months WHERE id = ?").run(month.id);
+  });
+  tx();
+  res.json({ success: true });
+});
+
+// Copy all bills from the most recent month before `newMonth` into the new month,
+// resetting every status to 'NOT PAID'. No-op if there's no earlier month or bills already exist.
+function seedBillsFromPreviousMonth(newMonthId, newMonthStr) {
+  const existing = db.prepare("SELECT COUNT(*) AS c FROM bookkeeping_bills WHERE month_id = ?").get(newMonthId);
+  if (existing.c > 0) return;
+  const prev = db.prepare(
+    "SELECT * FROM bookkeeping_months WHERE month < ? ORDER BY month DESC LIMIT 1"
+  ).get(newMonthStr);
+  if (!prev) return;
+  const srcBills = db.prepare("SELECT * FROM bookkeeping_bills WHERE month_id = ? ORDER BY sort_order").all(prev.id);
+  const insert = db.prepare(
+    "INSERT INTO bookkeeping_bills (month_id, group_name, name, amount, status, sort_order) VALUES (?, ?, ?, ?, 'NOT PAID', ?)"
+  );
+  const tx = db.transaction(() => {
+    srcBills.forEach(b => insert.run(newMonthId, b.group_name, b.name, b.amount, b.sort_order));
+  });
+  tx();
+}
 
 app.post("/api/bookkeeping", (req, res) => {
   const { month } = req.body;
@@ -626,6 +673,8 @@ app.post("/api/bookkeeping", (req, res) => {
   try {
     db.prepare("INSERT INTO bookkeeping_months (month, speedx_amount) VALUES (?, 0)").run(month);
     const newMonth = db.prepare("SELECT * FROM bookkeeping_months WHERE month = ?").get(month);
+    seedBillsFromPreviousMonth(newMonth.id, newMonth.month);
+    generateDeliveryWeeksForMonth(newMonth.id, newMonth.month);
     res.json(newMonth);
   } catch (e) {
     res.status(400).json({ error: "Month already exists" });
@@ -643,19 +692,20 @@ app.patch("/api/bookkeeping/bills/:id", (req, res) => {
 
 // ─── Bookkeeping Web UI ───────────────────────────────────────────────────────
 app.get("/bookkeeping", (req, res) => {
+  ensureCurrentMonth();
   const months = db.prepare("SELECT * FROM bookkeeping_months ORDER BY month DESC").all();
-  const currentMonth = months[0];
+  const todayYm = db.prepare("SELECT strftime('%Y-%m', date('now','localtime')) AS ym").get().ym;
+  const currentMonth = req.query.month
+    ? months.find(m => String(m.id) === String(req.query.month)) || months[0]
+    : (months.find(m => m.month === todayYm) || months[0]);
   if (!currentMonth) return res.send("<h1>No months found</h1>");
 
   const bills = db.prepare("SELECT * FROM bookkeeping_bills WHERE month_id = ? ORDER BY sort_order").all(currentMonth.id);
-  const deliveryWeeks = db.prepare("SELECT * FROM delivery_weeks").all();
-  let speedxTotal = 0;
-  deliveryWeeks.forEach(w => {
-    const tueBillable = Math.max(0, w.tue_delivered - w.tue_duplicates - w.tue_undeliverable);
-    const wedBillable = Math.max(0, w.wed_delivered - w.wed_duplicates - w.wed_undeliverable);
-    speedxTotal += (tueBillable + wedBillable) * 1.60;
-  });
-  speedxTotal = Math.round(speedxTotal * 100) / 100;
+
+  // Ensure this month's delivery weeks exist, then compute SpeedX from them
+  generateDeliveryWeeksForMonth(currentMonth.id, currentMonth.month);
+  const speedxChecks = speedxByCheckForMonth(currentMonth.id);
+  const speedxTotal = Math.round(Object.values(speedxChecks).reduce((a, b) => a + b, 0) * 100) / 100;
 
   const groups = {};
   bills.forEach(b => {
@@ -675,7 +725,7 @@ app.get("/bookkeeping", (req, res) => {
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Bookkeeping — ${currentMonth.month}</title>
+<title>Bookkeeping — ${(() => { const [yy, mm] = currentMonth.month.split('-'); return ['January','February','March','April','May','June','July','August','September','October','November','December'][parseInt(mm,10)-1] + ' ' + yy; })()}</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { background: #0a0a1a; color: #ddd; font-family: -apple-system, sans-serif; padding: 16px; }
@@ -697,8 +747,12 @@ app.get("/bookkeeping", (req, res) => {
   .bill-amount input { background: #0e0e1e; border: 1px solid #2a2a3a; border-radius: 4px; color: #fff; font-size: 13px; width: 70px; padding: 4px 6px; text-align: right; }
   .status-btn { border: none; border-radius: 6px; padding: 4px 0; font-size: 11px; font-weight: bold; cursor: pointer; white-space: nowrap; width: 80px; text-align: center; }
   .month-selector { display: flex; gap: 8px; margin-bottom: 20px; flex-wrap: wrap; align-items: center; }
-  .month-btn { background: #12122a; border: 1px solid #2a2a3a; color: #ccc; padding: 6px 14px; border-radius: 6px; cursor: pointer; font-size: 13px; }
-  .month-btn.active { background: #7b8cde; color: #fff; border-color: #7b8cde; }
+  .month-chip { display: inline-flex; align-items: stretch; border-radius: 6px; overflow: hidden; border: 1px solid #2a2a3a; }
+  .month-chip.active { border-color: #7b8cde; }
+  .month-btn { background: #12122a; border: none; color: #ccc; padding: 6px 12px; cursor: pointer; font-size: 13px; }
+  .month-btn.active { background: #7b8cde; color: #fff; }
+  .month-del { background: #12122a; border: none; border-left: 1px solid #2a2a3a; color: #888; padding: 6px 9px; cursor: pointer; font-size: 13px; line-height: 1; }
+  .month-del:hover { background: #3a1a1a; color: #CF6679; }
   .new-month { background: #1a2a1a; border: 1px solid #2a3a2a; color: #4CAF50; padding: 6px 14px; border-radius: 6px; cursor: pointer; font-size: 13px; }
   .toast { position: fixed; bottom: 20px; right: 20px; background: #4CAF50; color: #fff; padding: 10px 18px; border-radius: 8px; font-size: 13px; display: none; z-index: 999; }
   .remaining { font-size: 11px; color: #888; margin-top: 6px; }
@@ -709,8 +763,15 @@ app.get("/bookkeeping", (req, res) => {
 <div class="subtitle">Solo Leveling Finance Tracker</div>
 
 <div class="month-selector">
-  ${months.map(m => `<button class="month-btn ${m.id === currentMonth.id ? 'active' : ''}" onclick="location.href='/bookkeeping?month=${m.id}'">${m.month}</button>`).join('')}
-  <button class="new-month" onclick="createMonth()">+ New Month</button>
+  ${months.slice().sort((a, b) => a.month.localeCompare(b.month)).map(m => {
+    const [yy, mm] = m.month.split('-');
+    const mn = ['January','February','March','April','May','June','July','August','September','October','November','December'][parseInt(mm,10)-1];
+    const label = `${mn} ${yy}`;
+    return `<span class="month-chip ${m.id === currentMonth.id ? 'active' : ''}">`
+      + `<button class="month-btn ${m.id === currentMonth.id ? 'active' : ''}" onclick="location.href='/bookkeeping?month=${m.id}'">${label}</button>`
+      + `<button class="month-del" title="Delete ${label}" onclick="deleteMonth(${m.id}, '${label}')">×</button>`
+      + `</span>`;
+  }).join('')}
 </div>
 
 <div class="summary">
@@ -728,9 +789,9 @@ app.get("/bookkeeping", (req, res) => {
   allGroups.forEach(groupName => {
     const groupBills = groups[groupName];
     if (!groupBills) return;
-    const income = FIXED_INCOME[groupName] || (groupName.startsWith('SpeedX') ? speedxTotal / 4 : null);
+    const income = (groupName in speedxChecks) ? speedxChecks[groupName] : (GROUP_INCOME_LABELS[groupName] ?? null);
     const groupTotal = groupBills.filter(b => b.status !== 'ON HOLD').reduce((sum, b) => sum + b.amount, 0);
-    const remaining = (income && groupName !== 'People' && groupName !== 'Subscriptions') ? income - groupTotal : null;
+    const remaining = (income !== null && groupName !== 'People' && groupName !== 'Subscriptions') ? income - groupTotal : null;
 
     html += `<div class="card">
       <div class="card-header">
@@ -803,6 +864,12 @@ function createMonth() {
     else location.href = '/bookkeeping?month=' + data.id;
   });
 }
+
+function deleteMonth(id, label) {
+  if (!confirm('Delete ' + label + '? This removes its bills and delivery weeks. This cannot be undone.')) return;
+  fetch('/api/bookkeeping/' + id, { method: 'DELETE' })
+    .then(r => r.json()).then(() => { location.href = '/bookkeeping'; });
+}
 </script>
 </body>
 </html>`;
@@ -816,6 +883,8 @@ function initDeliveryTracker() {
     CREATE TABLE IF NOT EXISTS delivery_weeks (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       week_start TEXT NOT NULL UNIQUE,
+      month_id INTEGER,
+      check_number INTEGER,
       tue_delivered INTEGER NOT NULL DEFAULT 0,
       tue_duplicates INTEGER NOT NULL DEFAULT 0,
       tue_undeliverable INTEGER NOT NULL DEFAULT 0,
@@ -824,9 +893,44 @@ function initDeliveryTracker() {
       wed_undeliverable INTEGER NOT NULL DEFAULT 0
     )
   `).run();
+
+  // Migration: add columns if upgrading an existing table
+  const cols = db.prepare("PRAGMA table_info(delivery_weeks)").all().map(c => c.name);
+  if (!cols.includes('month_id')) {
+    db.prepare("ALTER TABLE delivery_weeks ADD COLUMN month_id INTEGER").run();
+  }
+  if (!cols.includes('check_number')) {
+    db.prepare("ALTER TABLE delivery_weeks ADD COLUMN check_number INTEGER").run();
+  }
 }
 
 initDeliveryTracker();
+
+// One-time backfill: tag existing delivery weeks to their correct month by pay date,
+// and ensure each existing bookkeeping month has its weeks generated.
+// Auto-creates a month if an existing week's pay date falls in a month that doesn't exist yet
+// (e.g. a Jun 14 week pays in July -> creates July so its data is preserved).
+(function backfillDeliveryWeeks() {
+  try {
+    const orphanWeeks = db.prepare("SELECT * FROM delivery_weeks WHERE month_id IS NULL").all();
+    orphanWeeks.forEach(w => {
+      const ym = payMonthFor(w.week_start);
+      let month = db.prepare("SELECT * FROM bookkeeping_months WHERE month = ?").get(ym);
+      if (!month) {
+        db.prepare("INSERT INTO bookkeeping_months (month, speedx_amount) VALUES (?, 0)").run(ym);
+        month = db.prepare("SELECT * FROM bookkeeping_months WHERE month = ?").get(ym);
+      }
+    });
+    // Generate/normalize weeks for every existing month, and seed bills for any empty month
+    const allMonths = db.prepare("SELECT * FROM bookkeeping_months").all();
+    allMonths.forEach(m => {
+      generateDeliveryWeeksForMonth(m.id, m.month);
+      seedBillsFromPreviousMonth(m.id, m.month);
+    });
+  } catch (e) {
+    console.error("Delivery week backfill error:", e.message);
+  }
+})();
 
 function getWeekStart(dateStr) {
   const d = new Date(dateStr + 'T12:00:00');
@@ -837,23 +941,81 @@ function getWeekStart(dateStr) {
   return sunday.toISOString().split('T')[0];
 }
 
-function ensureRecentWeeks() {
-  const todayStr = db.prepare("SELECT date('now', 'localtime') as today").get().today;
-  for (let i = 2; i >= 0; i--) {
-    const d = new Date(todayStr + 'T12:00:00');
-    d.setDate(d.getDate() - (i * 7));
-    const ds = d.toISOString().split('T')[0];
-    const weekStart = getWeekStart(ds);
-    const exists = db.prepare("SELECT COUNT(*) as count FROM delivery_weeks WHERE week_start = ?").get(weekStart);
-    if (exists.count === 0) {
-      db.prepare("INSERT INTO delivery_weeks (week_start) VALUES (?)").run(weekStart);
-    }
-  }
-  return db.prepare("SELECT * FROM delivery_weeks ORDER BY week_start DESC LIMIT 3").all().reverse();
+// Billable pay for a single delivery week row
+function weekBillable(w) {
+  const tueBillable = Math.max(0, w.tue_delivered - w.tue_duplicates - w.tue_undeliverable);
+  const wedBillable = Math.max(0, w.wed_delivered - w.wed_duplicates - w.wed_undeliverable);
+  return (tueBillable + wedBillable) * 1.60;
 }
 
+// Pay date for a delivery week = that week's Wednesday (week_start + 3) + 16 days
+function payDateFor(weekStartStr) {
+  const d = new Date(weekStartStr + 'T12:00:00');
+  d.setDate(d.getDate() + 3 + 16);
+  return d.toISOString().split('T')[0];
+}
+
+// The month (YYYY-MM) a delivery week belongs to = month its pay date falls in
+function payMonthFor(weekStartStr) {
+  return payDateFor(weekStartStr).slice(0, 7);
+}
+
+// All week_start Sundays whose pay date falls in the given YYYY-MM, in date order
+function weekStartsForMonth(ym) {
+  const [y, m] = ym.split('-').map(Number);
+  const firstOfMonth = new Date(Date.UTC(y, m - 1, 1, 12));
+  const scan = new Date(firstOfMonth);
+  scan.setUTCDate(scan.getUTCDate() - 56);
+  while (scan.getUTCDay() !== 0) scan.setUTCDate(scan.getUTCDate() + 1);
+  const out = [];
+  const cur = new Date(scan);
+  for (let i = 0; i < 16; i++) {
+    const ws = cur.toISOString().split('T')[0];
+    if (payMonthFor(ws) === ym) out.push(ws);
+    cur.setUTCDate(cur.getUTCDate() + 7);
+  }
+  return out;
+}
+
+// Ensure a bookkeeping month has its delivery weeks generated (check_number 1..N in date order).
+// Reuses any existing delivery_weeks row with a matching week_start (preserves entered data).
+function generateDeliveryWeeksForMonth(monthId, ym) {
+  const starts = weekStartsForMonth(ym);
+  starts.forEach((ws, idx) => {
+    const checkNumber = idx + 1;
+    const existing = db.prepare("SELECT * FROM delivery_weeks WHERE week_start = ?").get(ws);
+    if (existing) {
+      db.prepare("UPDATE delivery_weeks SET month_id = ?, check_number = ? WHERE week_start = ?")
+        .run(monthId, checkNumber, ws);
+    } else {
+      db.prepare("INSERT INTO delivery_weeks (week_start, month_id, check_number) VALUES (?, ?, ?)")
+        .run(ws, monthId, checkNumber);
+    }
+  });
+}
+
+// Returns the SpeedX Check label -> billable amount map for a specific month
+function speedxByCheckForMonth(monthId) {
+  const weeks = db.prepare("SELECT * FROM delivery_weeks WHERE month_id = ? ORDER BY check_number").all(monthId);
+  const map = {};
+  weeks.forEach(w => {
+    map['SpeedX Check ' + w.check_number] = Math.round(weekBillable(w) * 100) / 100;
+  });
+  return map;
+}
+
+// Delivery weeks for a given bookkeeping month (generates them if missing).
+// If no month specified, default to the most recent bookkeeping month.
 app.get("/api/delivery-weeks", (req, res) => {
-  const weeks = ensureRecentWeeks();
+  let month;
+  if (req.query.month_id) {
+    month = db.prepare("SELECT * FROM bookkeeping_months WHERE id = ?").get(req.query.month_id);
+  } else {
+    month = db.prepare("SELECT * FROM bookkeeping_months ORDER BY month DESC LIMIT 1").get();
+  }
+  if (!month) return res.json([]);
+  generateDeliveryWeeksForMonth(month.id, month.month);
+  const weeks = db.prepare("SELECT * FROM delivery_weeks WHERE month_id = ? ORDER BY check_number").all(month.id);
   res.json(weeks);
 });
 
@@ -891,40 +1053,3 @@ app.delete("/api/delivery-weeks/:id", (req, res) => {
 app.listen(3743, "0.0.0.0", () => {
   console.log("Solo Leveling on 3743");
 });
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

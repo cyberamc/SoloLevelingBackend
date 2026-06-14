@@ -166,14 +166,43 @@ function epley1RM(weightLbs, reps) {
   return Math.round(weightLbs * (1 + reps / 30));
 }
 
+// Standards for 35-year-old male at 191 lbs [beginner, novice, intermediate, advanced, elite] in lbs 1RM
 const STRENGTH_STANDARDS = {
-  "Bench Press (Barbell)":         [100, 145, 200, 275, 360],
-  "Squat (Barbell)":               [125, 190, 270, 370, 480],
-  "Deadlift (Barbell)":            [150, 225, 325, 445, 580],
-  "Overhead Press (Barbell)":      [65,  95,  135, 185, 245],
-  "Bent Over Row (Barbell)":       [85,  130, 185, 255, 335],
-  "Romanian Deadlift":             [120, 185, 265, 365, 475],
-  "Incline Bench Press (Barbell)": [85,  125, 175, 240, 315],
+  "Bench Press (Barbell)":                      [96,  143, 191, 239, 287],
+  "Squat (Barbell)":                            [143, 239, 287, 382, 478],
+  "Deadlift (Barbell)":                         [191, 287, 334, 430, 525],
+  "Overhead Press (Barbell)":                   [67,  96,  124, 162, 210],
+  "Bent Over Row (Barbell)":                    [86,  124, 172, 229, 300],
+  "Romanian Deadlift":                          [120, 182, 258, 354, 460],
+  "Incline Bench Press (Barbell)":              [84,  120, 167, 229, 300],
+  "Supine Press":                               [96,  143, 191, 239, 287],
+  "Shoulder Press (Dumbbell)":                  [44,  66,  88,  110, 132],
+  "Incline Bench Press (Dumbbell)":             [44,  66,  88,  110, 132],
+  "Skullcrusher (Barbell)":                     [44,  66,  88,  110, 132],
+  "Triceps Pushdown":                           [33,  55,  77,  99,  121],
+  "Triceps Overhead Extension":                 [44,  66,  88,  110, 132],
+  "Lean-Back Lat Pulldown":                     [77,  121, 165, 209, 253],
+  "Lat Pulldown (Band)":                        [77,  121, 165, 209, 253],
+  "Chest Supported Incline Row (Dumbbell)":     [55,  88,  121, 154, 187],
+  "Bent Over Row (Smith Machine)":              [86,  124, 172, 229, 300],
+  "Hammer Curl (Cable)":                        [33,  55,  77,  99,  121],
+  "Single Arm Preacher Curl":                   [22,  44,  66,  88,  110],
+  "Bayesian Cable Curl":                        [22,  44,  66,  88,  110],
+  "Hack Squat (Machine)":                       [121, 198, 275, 352, 440],
+  "Split Squat (Smith Machine)":                [55,  99,  143, 187, 231],
+  "Lunge (Dumbbell)":                           [44,  77,  110, 143, 176],
+  "Lying Leg Curl (Machine)":                   [77,  121, 165, 209, 253],
+  "Seated Leg Curl (Machine)":                  [77,  121, 165, 209, 253],
+  "Leg Extension (Machine)":                    [99,  154, 209, 264, 319],
+  "Back Extension (Weighted Hyperextension)":   [33,  55,  88,  121, 154],
+  "Calf Press (Machine)":                       [165, 253, 341, 429, 517],
+  "Calf Extension (Machine)":                   [165, 253, 341, 429, 517],
+  "Hip Abduction (Machine)":                    [77,  121, 165, 209, 253],
+  "Ab Crunch (Machine)":                        [55,  99,  143, 187, 231],
+  "Low-To-High Cable Crossover":                [22,  33,  44,  66,  88],
+  "Single Arm Lateral Raise (Cable)":           [11,  22,  33,  44,  55],
+  "Single Arm Rear Delt Flye (Cable)":          [11,  22,  33,  44,  55],
+  "Paused Shrug-In (Cable)":                    [99,  154, 209, 264, 319],
 };
 
 function getStrengthInfo(title, oneRM) {
@@ -545,17 +574,19 @@ app.patch("/api/supplement-inventory/:id", (req, res) => {
 // ─── Bookkeeping ──────────────────────────────────────────────────────────────
 
 const FIXED_INCOME = {
-  'Check 1': 590,
-  'Check 2': 581,
-  'Check 3': 587,
-  'Check 4': 578,
-  'Plasma': 520
+  'IT Check 1': 620,
+  'IT Check 2': 620,
+  'IT Check 3': 620,
+  'IT Check 4': 620,
+  'Plasma': 520,
+  'People': 135,
+  'Subscriptions': 61
 };
 
 const GROUP_ORDER = [
-  'Check 1', 'Check 2', 'Check 3', 'Check 4', 'Plasma',
+  'IT Check 1', 'IT Check 2', 'IT Check 3', 'IT Check 4', 'People',
   'SpeedX Check 1', 'SpeedX Check 2', 'SpeedX Check 3', 'SpeedX Check 4',
-  'People', 'Subscriptions'
+  'Subscriptions'
 ];
 
 app.get("/api/bookkeeping", (req, res) => {
@@ -633,7 +664,7 @@ app.get("/bookkeeping", (req, res) => {
   });
 
   const totalIncome = Object.values(FIXED_INCOME).reduce((a, b) => a + b, 0) + speedxTotal;
-  const totalExpenses = bills.reduce((sum, b) => sum + b.amount, 0);
+  const totalExpenses = bills.filter(b => b.status !== 'ON HOLD' && b.group_name !== 'People').reduce((sum, b) => sum + b.amount, 0);
   const paidExpenses = bills.filter(b => b.status === 'PAID' || b.status === 'AUTOPAY').reduce((sum, b) => sum + b.amount, 0);
 
   const statusColors = { 'PAID': '#4CAF50', 'NOT PAID': '#888', 'AUTOPAY': '#D4B84A', 'ON HOLD': '#8B4513' };
@@ -651,20 +682,20 @@ app.get("/bookkeeping", (req, res) => {
   h1 { color: #fff; font-size: 24px; margin-bottom: 4px; }
   .subtitle { color: #888; font-size: 13px; margin-bottom: 20px; }
   .summary { display: flex; gap: 12px; margin-bottom: 24px; flex-wrap: wrap; }
-  .summary-box { background: #12122a; border-radius: 8px; padding: 14px 20px; flex: 1; min-width: 140px; }
+  .summary-box { background: #12122a; border-radius: 8px; padding: 14px 20px; flex: 0 0 auto; min-width: 140px; }
   .summary-box .label { font-size: 11px; color: #888; margin-bottom: 4px; }
   .summary-box .value { font-size: 20px; font-weight: bold; }
-  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 16px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 16px; align-items: start; }
   .card { background: #12122a; border-radius: 10px; padding: 14px; }
   .card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
   .card-title { font-size: 14px; font-weight: bold; color: #7b8cde; }
   .card-income { font-size: 13px; color: #4CAF50; font-weight: bold; }
-  .bill-row { display: flex; align-items: center; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #1a1a2e; gap: 8px; }
+  .bill-row { display: flex; align-items: center; padding: 8px 0; border-bottom: 1px solid #1a1a2e; gap: 8px; }
   .bill-row:last-child { border-bottom: none; }
   .bill-name { font-size: 13px; color: #ccc; flex: 1; }
   .bill-amount { font-size: 13px; color: #fff; font-weight: 600; min-width: 48px; text-align: right; }
   .bill-amount input { background: #0e0e1e; border: 1px solid #2a2a3a; border-radius: 4px; color: #fff; font-size: 13px; width: 70px; padding: 4px 6px; text-align: right; }
-  .status-btn { border: none; border-radius: 6px; padding: 4px 10px; font-size: 11px; font-weight: bold; cursor: pointer; white-space: nowrap; }
+  .status-btn { border: none; border-radius: 6px; padding: 4px 0; font-size: 11px; font-weight: bold; cursor: pointer; white-space: nowrap; width: 80px; text-align: center; }
   .month-selector { display: flex; gap: 8px; margin-bottom: 20px; flex-wrap: wrap; align-items: center; }
   .month-btn { background: #12122a; border: 1px solid #2a2a3a; color: #ccc; padding: 6px 14px; border-radius: 6px; cursor: pointer; font-size: 13px; }
   .month-btn.active { background: #7b8cde; color: #fff; border-color: #7b8cde; }
@@ -685,21 +716,21 @@ app.get("/bookkeeping", (req, res) => {
 <div class="summary">
   <div class="summary-box"><div class="label">Total Income</div><div class="value" style="color:#4CAF50">$${totalIncome.toFixed(2)}</div></div>
   <div class="summary-box"><div class="label">Total Expenses</div><div class="value" style="color:#CF6679">$${totalExpenses.toFixed(2)}</div></div>
-  <div class="summary-box"><div class="label">Paid So Far</div><div class="value" style="color:#D4B84A">$${paidExpenses.toFixed(2)}</div></div>
-  <div class="summary-box"><div class="label">Remaining</div><div class="value" style="color:#7b8cde">$${(totalExpenses - paidExpenses).toFixed(2)}</div></div>
-  <div class="summary-box"><div class="label">SpeedX (Delivery)</div><div class="value" style="color:#4CAF50">$${speedxTotal.toFixed(2)}</div></div>
+  
+  
+  <div class="summary-box"><div class="label">Plasma</div><div class="value" style="color:#4CAF50">$520.00</div></div>
 </div>
 
 <div class="grid">`;
 
-  const allGroups = [...GROUP_ORDER, ...Object.keys(groups).filter(g => !GROUP_ORDER.includes(g))];
+  const allGroups = [...GROUP_ORDER, ...Object.keys(groups).filter(g => !GROUP_ORDER.includes(g) && g !== 'Plasma')];
 
   allGroups.forEach(groupName => {
     const groupBills = groups[groupName];
     if (!groupBills) return;
     const income = FIXED_INCOME[groupName] || (groupName.startsWith('SpeedX') ? speedxTotal / 4 : null);
-    const groupTotal = groupBills.reduce((sum, b) => sum + b.amount, 0);
-    const remaining = income ? income - groupTotal : null;
+    const groupTotal = groupBills.filter(b => b.status !== 'ON HOLD').reduce((sum, b) => sum + b.amount, 0);
+    const remaining = (income && groupName !== 'People' && groupName !== 'Subscriptions') ? income - groupTotal : null;
 
     html += `<div class="card">
       <div class="card-header">
@@ -711,7 +742,7 @@ app.get("/bookkeeping", (req, res) => {
       const color = statusColors[bill.status] || '#888';
       html += `<div class="bill-row">
         <span class="bill-name">${bill.name}</span>
-        <input type="number" value="${bill.amount}" onchange="updateAmount(${bill.id}, this.value)" style="background:#0e0e1e;border:1px solid #2a2a3a;border-radius:4px;color:#fff;font-size:12px;width:65px;padding:3px 5px;text-align:right;">
+        <input type="number" value="${bill.amount}" onchange="updateAmount(${bill.id}, this.value)" style="background:#0e0e1e;border:1px solid #2a2a3a;border-radius:4px;color:#fff;font-size:12px;flex:0 0 65px;box-sizing:border-box;width:65px;padding:3px 5px;text-align:right;">
         <button class="status-btn" style="background:${color}22;color:${color};border:1px solid ${color}44" onclick="cycleStatus(${bill.id}, this)">${bill.status}</button>
       </div>`;
     });
@@ -860,3 +891,40 @@ app.delete("/api/delivery-weeks/:id", (req, res) => {
 app.listen(3743, "0.0.0.0", () => {
   console.log("Solo Leveling on 3743");
 });
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

@@ -635,6 +635,15 @@ function ensureCurrentMonth() {
   return month;
 }
 
+// Update a month's notes
+app.patch("/api/bookkeeping/:monthId/notes", (req, res) => {
+  const { notes } = req.body;
+  const month = db.prepare("SELECT * FROM bookkeeping_months WHERE id = ?").get(req.params.monthId);
+  if (!month) return res.status(404).json({ error: "Month not found" });
+  db.prepare("UPDATE bookkeeping_months SET notes = ? WHERE id = ?").run(notes ?? '', month.id);
+  res.json({ success: true });
+});
+
 // Delete a month and all its bills + delivery weeks
 app.delete("/api/bookkeeping/:monthId", (req, res) => {
   const month = db.prepare("SELECT * FROM bookkeeping_months WHERE id = ?").get(req.params.monthId);
@@ -735,7 +744,11 @@ app.get("/bookkeeping", (req, res) => {
   .summary-box { background: #12122a; border-radius: 8px; padding: 14px 20px; flex: 0 0 auto; min-width: 140px; }
   .summary-box .label { font-size: 11px; color: #888; margin-bottom: 4px; }
   .summary-box .value { font-size: 20px; font-weight: bold; }
-  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 16px; align-items: start; }
+  .notes-box { min-width: 240px; max-width: none; }
+  .notes-input { width: 100%; min-height: 48px; margin-top: 6px; background: #0e0e1e; border: 1px solid #2a2a3a; border-radius: 6px; color: #fff; font-size: 13px; padding: 6px 8px; resize: both; font-family: inherit; }
+  .notes-save { margin-top: 6px; background: #1a2a1a; border: 1px solid #2a3a2a; color: #4CAF50; padding: 4px 14px; border-radius: 6px; cursor: pointer; font-size: 12px; }
+  .notes-save:hover { background: #24382a; }
+  .grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 16px; align-items: start; }
   .card { background: #12122a; border-radius: 10px; padding: 14px; }
   .card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
   .card-title { font-size: 14px; font-weight: bold; color: #7b8cde; }
@@ -777,9 +790,12 @@ app.get("/bookkeeping", (req, res) => {
 <div class="summary">
   <div class="summary-box"><div class="label">Total Income</div><div class="value" style="color:#4CAF50">$${totalIncome.toFixed(2)}</div></div>
   <div class="summary-box"><div class="label">Total Expenses</div><div class="value" style="color:#CF6679">$${totalExpenses.toFixed(2)}</div></div>
-  
-  
   <div class="summary-box"><div class="label">Plasma</div><div class="value" style="color:#4CAF50">$520.00</div></div>
+  <div class="summary-box notes-box">
+    <div class="label">Notes</div>
+    <textarea id="month-notes" class="notes-input" placeholder="Add a note...">${(currentMonth.notes || '').replace(/</g, '&lt;')}</textarea>
+    <button class="notes-save" onclick="saveNotes(${currentMonth.id})">Save</button>
+  </div>
 </div>
 
 <div class="grid">`;
@@ -870,6 +886,29 @@ function deleteMonth(id, label) {
   fetch('/api/bookkeeping/' + id, { method: 'DELETE' })
     .then(r => r.json()).then(() => { location.href = '/bookkeeping'; });
 }
+
+function saveNotes(monthId) {
+  const notes = document.getElementById('month-notes').value;
+  fetch('/api/bookkeeping/' + monthId + '/notes', {
+    method: 'PATCH',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({notes})
+  }).then(() => showToast());
+}
+
+// Remember the notes box size across page loads (per browser)
+(function () {
+  const ta = document.getElementById('month-notes');
+  if (!ta) return;
+  try {
+    const saved = JSON.parse(localStorage.getItem('notesBoxSize') || 'null');
+    if (saved && saved.w && saved.h) { ta.style.width = saved.w; ta.style.height = saved.h; }
+  } catch (e) {}
+  const obs = new ResizeObserver(() => {
+    try { localStorage.setItem('notesBoxSize', JSON.stringify({ w: ta.style.width, h: ta.style.height })); } catch (e) {}
+  });
+  obs.observe(ta);
+})();
 </script>
 </body>
 </html>`;
@@ -901,6 +940,12 @@ function initDeliveryTracker() {
   }
   if (!cols.includes('check_number')) {
     db.prepare("ALTER TABLE delivery_weeks ADD COLUMN check_number INTEGER").run();
+  }
+
+  // Migration: add notes column to bookkeeping_months
+  const mcols = db.prepare("PRAGMA table_info(bookkeeping_months)").all().map(c => c.name);
+  if (!mcols.includes('notes')) {
+    db.prepare("ALTER TABLE bookkeeping_months ADD COLUMN notes TEXT DEFAULT ''").run();
   }
 }
 

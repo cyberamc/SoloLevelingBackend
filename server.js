@@ -3,12 +3,236 @@ const cors = require("cors");
 const Database = require("better-sqlite3");
 const path = require("path");
 const https = require("https");
+const crypto = require("crypto");
 
 const db = new Database(path.join(__dirname, "system.db"));
 const app = express();
 
 app.use(cors());
 app.use(express.json());
+app.use(express.urlencoded({ extended: false })); // parse login form posts
+
+// ─── Web Page Auth (protects /bookkeeping and /notepad only; APIs stay open) ────
+const AUTH_PASSWORD = process.env.SL_PASSWORD || "changeme";
+const AUTH_SECRET = process.env.SL_SECRET || "sl-default-secret-change-me";
+
+function makeAuthToken() {
+  return crypto.createHmac("sha256", AUTH_SECRET).update("sl-authed").digest("hex");
+}
+function isValidToken(token) {
+  if (!token) return false;
+  const expected = makeAuthToken();
+  const a = Buffer.from(token);
+  const b = Buffer.from(expected);
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+function getCookie(req, name) {
+  const header = req.headers.cookie;
+  if (!header) return null;
+  const match = header.split(";").map(c => c.trim()).find(c => c.startsWith(name + "="));
+  return match ? decodeURIComponent(match.split("=").slice(1).join("=")) : null;
+}
+function requireAuth(req, res, next) {
+  if (isValidToken(getCookie(req, "sl_auth"))) return next();
+  return res.redirect("/login?next=" + encodeURIComponent(req.originalUrl));
+}
+
+app.get("/login", (req, res) => {
+  const next = (req.query.next || "/bookkeeping").toString().replace(/"/g, "");
+  const err = req.query.err ? '<div class="err">Incorrect password</div>' : '';
+  res.send(`<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Login</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #0a0a1a; color: #ddd; font-family: -apple-system, sans-serif; display: flex; min-height: 100vh; align-items: center; justify-content: center; }
+  .card { background: #12122a; border: 1px solid #2a2a3a; border-radius: 12px; padding: 32px; width: 320px; }
+  h1 { color: #fff; font-size: 20px; margin-bottom: 6px; }
+  .sub { color: #888; font-size: 13px; margin-bottom: 20px; }
+  input { width: 100%; background: #0e0e1e; border: 1px solid #2a2a3a; border-radius: 8px; color: #fff; font-size: 15px; padding: 10px 12px; margin-bottom: 12px; }
+  button { width: 100%; background: #7b8cde; border: none; border-radius: 8px; color: #fff; font-size: 15px; font-weight: bold; padding: 10px; cursor: pointer; }
+  .err { color: #CF6679; font-size: 13px; margin-bottom: 12px; }
+</style></head>
+<body>
+  <form class="card" method="POST" action="/login">
+    <h1>Solo Leveling</h1>
+    <div class="sub">Enter password to continue</div>
+    ${err}
+    <input type="hidden" name="next" value="${next}">
+    <input type="password" name="password" placeholder="Password" autofocus>
+    <button type="submit">Log In</button>
+  </form>
+</body></html>`);
+});
+
+app.post("/login", (req, res) => {
+  const { password, next } = req.body;
+  if (password === AUTH_PASSWORD) {
+    const token = makeAuthToken();
+    res.setHeader("Set-Cookie", `sl_auth=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=31536000`);
+    const dest = (next || "/bookkeeping").toString();
+    return res.redirect(dest.startsWith("/") ? dest : "/bookkeeping");
+  }
+  return res.redirect("/login?err=1&next=" + encodeURIComponent(next || "/bookkeeping"));
+});
+
+app.get("/logout", (req, res) => {
+  res.setHeader("Set-Cookie", "sl_auth=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0");
+  res.redirect("/login");
+});
+
+// ─── Decompression Protocol (view-only reference page) ──────────────────────────
+app.get("/protocol", (req, res) => {
+  res.send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Decompression Protocol</title>
+<style>
+  :root {
+    --bg: #060911;
+    --panel: rgba(13, 22, 38, 0.72);
+    --panel-edge: rgba(86, 168, 255, 0.32);
+    --glow: #56b0ff;
+    --glow-soft: rgba(86, 176, 255, 0.55);
+    --ink: #dce8fb;
+    --ink-dim: #7e93b4;
+    --ink-faint: #4d5e7c;
+    --amber: #ffcf6b;
+    --rule: rgba(86, 168, 255, 0.16);
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background:
+      radial-gradient(circle at 50% -10%, rgba(40, 92, 168, 0.22), transparent 55%),
+      radial-gradient(circle at 50% 120%, rgba(30, 70, 140, 0.16), transparent 50%),
+      var(--bg);
+    color: var(--ink);
+    font-family: "Segoe UI", "SF Pro Display", system-ui, sans-serif;
+    min-height: 100vh;
+    padding: 28px 18px 64px;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 620px; margin: 0 auto; }
+  .banner { text-align: center; margin-bottom: 30px; animation: rise 0.7s ease both; }
+  .arrival {
+    font-size: 10px; letter-spacing: 0.42em; color: var(--glow);
+    text-transform: uppercase; margin-bottom: 14px; opacity: 0.85;
+  }
+  .arrival::before, .arrival::after { content: "\u25C6"; margin: 0 10px; font-size: 7px; vertical-align: middle; }
+  .title {
+    font-size: clamp(26px, 7vw, 38px); font-weight: 800; letter-spacing: 0.14em;
+    text-transform: uppercase; color: #fff;
+    text-shadow: 0 0 18px var(--glow-soft), 0 0 42px rgba(86, 168, 255, 0.3); line-height: 1.1;
+  }
+  .subtitle {
+    margin-top: 12px; font-size: 13px; color: var(--ink-dim); letter-spacing: 0.02em;
+    line-height: 1.5; max-width: 440px; margin-left: auto; margin-right: auto;
+  }
+  .keystone {
+    border: 1px solid var(--panel-edge);
+    background: linear-gradient(180deg, rgba(86, 168, 255, 0.08), rgba(13, 22, 38, 0.4));
+    border-radius: 6px; padding: 18px 20px; text-align: center; margin-bottom: 34px;
+    box-shadow: 0 0 26px rgba(86, 168, 255, 0.07) inset; animation: rise 0.7s 0.1s ease both;
+  }
+  .keystone .q { font-size: 19px; font-weight: 700; color: #fff; letter-spacing: 0.03em; }
+  .keystone .q span { color: var(--glow); }
+  .keystone .note { font-size: 11.5px; color: var(--ink-faint); margin-top: 8px; letter-spacing: 0.04em; }
+  .panel {
+    border: 1px solid var(--rule); background: var(--panel); border-radius: 6px;
+    margin-bottom: 18px; overflow: hidden; backdrop-filter: blur(3px); animation: rise 0.7s ease both;
+  }
+  .panel.p1 { animation-delay: 0.18s; }
+  .panel.p2 { animation-delay: 0.26s; }
+  .panel.p3 { animation-delay: 0.34s; }
+  .phead {
+    display: flex; align-items: baseline; gap: 12px; padding: 15px 18px 12px;
+    border-bottom: 1px solid var(--rule); border-left: 3px solid var(--glow);
+  }
+  .pnum { font-size: 11px; font-weight: 700; color: var(--glow); letter-spacing: 0.1em; font-variant-numeric: tabular-nums; }
+  .pstate { font-size: 16px; font-weight: 700; color: #fff; letter-spacing: 0.02em; }
+  .pcue { margin-left: auto; font-size: 10.5px; color: var(--ink-dim); font-style: italic; text-align: right; max-width: 46%; }
+  .pbody { padding: 6px 18px 16px; }
+  .move { display: flex; gap: 12px; padding: 11px 0; border-bottom: 1px solid rgba(86, 168, 255, 0.07); }
+  .move:last-child { border-bottom: none; }
+  .mtick { color: var(--glow); font-size: 12px; flex-shrink: 0; margin-top: 3px; opacity: 0.8; }
+  .mtext { font-size: 14px; line-height: 1.5; }
+  .mtext b { color: #fff; font-weight: 600; }
+  .mtext .why { color: var(--ink-dim); }
+  .slip {
+    margin-top: 30px; border: 1px dashed rgba(255, 207, 107, 0.4); border-radius: 6px;
+    padding: 16px 20px; background: rgba(255, 207, 107, 0.04); animation: rise 0.7s 0.42s ease both;
+  }
+  .slip .label { font-size: 10px; letter-spacing: 0.28em; color: var(--amber); text-transform: uppercase; margin-bottom: 8px; }
+  .slip p { font-size: 13px; line-height: 1.6; color: var(--ink); }
+  .slip p b { color: var(--amber); font-weight: 600; }
+  .foot { text-align: center; margin-top: 28px; font-size: 10px; letter-spacing: 0.24em; color: var(--ink-faint); text-transform: uppercase; }
+  @keyframes rise { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: translateY(0); } }
+  @media (prefers-reduced-motion: reduce) { * { animation: none !important; } }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <header class="banner">
+      <h1 class="title">Decompression<br>Protocol</h1>
+      <p class="subtitle">When you're depleted and the urge shows up, don't negotiate. Identify the state, then pick from its list. The decision is already made.</p>
+    </header>
+
+    <div class="keystone">
+      <div class="q">Which <span>tired</span> am I?</div>
+      <div class="note">Answer that first \u2014 then go straight to the matching block.</div>
+    </div>
+
+    <section class="panel p1">
+      <div class="phead">
+        <span class="pnum">01</span>
+        <span class="pstate">Wired but tired</span>
+        <span class="pcue">stress energy, can't settle</span>
+      </div>
+      <div class="pbody">
+        <div class="move"><span class="mtick">\u25B8</span><span class="mtext"><b>Extended breath work.</b> <span class="why">90-second practice stretched to 5 min, long exhales. Same reset the urge reaches for.</span></span></div>
+        <div class="move"><span class="mtick">\u25B8</span><span class="mtext"><b>Short walk or the walking pad.</b> <span class="why">Burns the restless energy off, low effort.</span></span></div>
+        <div class="move"><span class="mtick">\u25B8</span><span class="mtext"><b>Cold water on the face / step outside.</b> <span class="why">Breaks the loop in under a minute.</span></span></div>
+      </div>
+    </section>
+
+    <section class="panel p2">
+      <div class="phead">
+        <span class="pnum">02</span>
+        <span class="pstate">Flat-out depleted</span>
+        <span class="pcue">no energy, just want to check out</span>
+      </div>
+      <div class="pbody">
+        <div class="move"><span class="mtick">\u25B8</span><span class="mtext"><b>An anime episode, fully.</b> <span class="why">Pick before, not mid-scroll. Solo Leveling, JJK, whatever's queued.</span></span></div>
+        <div class="move"><span class="mtick">\u25B8</span><span class="mtext"><b>EDM set, headphones, lights low.</b> <span class="why">Pure decompression, no output required.</span></span></div>
+        <div class="move"><span class="mtick">\u25B8</span><span class="mtext"><b>Volcano session</b> <span class="why">paired with either of the above.</span></span></div>
+        <div class="move"><span class="mtick">\u25B8</span><span class="mtext"><b>A real 20-minute lie-down.</b> <span class="why">Sometimes the honest move is rest, not a technique.</span></span></div>
+      </div>
+    </section>
+
+    <section class="panel p3">
+      <div class="phead">
+        <span class="pnum">03</span>
+        <span class="pstate">Bored-restless</span>
+        <span class="pcue">idle hands, evening gap</span>
+      </div>
+      <div class="pbody">
+        <div class="move"><span class="mtick">\u25B8</span><span class="mtext"><b>A gaming session.</b> <span class="why">Already enjoy it \u2014 have it ready to go.</span></span></div>
+        <div class="move"><span class="mtick">\u25B8</span><span class="mtext"><b>Hit up friends / text someone.</b> <span class="why">Social contact is a strong state-changer, easy to skip when tired.</span></span></div>
+      </div>
+    </section>
+
+    <div class="slip">
+      <div class="label">If you slip</div>
+      <p>It's <b>data, not failure.</b> Note which state you were in and whether the right option was actually queued up. A slip usually means the list was empty \u2014 that's fixable. The shame spiral causes more relapses than the slip itself.</p>
+    </div>
+
+  </div>
+</body>
+</html>`);
+});
 
 // ─── Hevy Config ──────────────────────────────────────────────────────────────
 const HEVY_API_KEY = "d4b36ead-42d1-4916-9055-3ddb36d123f1";
@@ -260,6 +484,72 @@ app.get("/api/weekly-quests/all", (req, res) => {
   res.json(withOverdue);
 });
 
+// Read-only: full routine for a given weekday (0=Sun..6=Sat) from templates.
+// Returns daily + required(weekly) quests merged, sorted by time. Does not touch live quests.
+app.get("/api/routine/:weekday", (req, res) => {
+  const wd = parseInt(req.params.weekday, 10);
+  if (isNaN(wd) || wd < 0 || wd > 6) return res.status(400).json({ error: "weekday must be 0-6" });
+
+  // Daily templates for this day
+  let dailyTemplates;
+  if (wd === 2 || wd === 3) {
+    // Delivery days: templates that have tuesday_time/wednesday_time set
+    const col = wd === 2 ? 'tuesday_time' : 'wednesday_time';
+    dailyTemplates = db.prepare(
+      `SELECT * FROM daily_quest_templates WHERE ${col} IS NOT NULL AND time IS NULL`
+    ).all().map(t => ({ ...t, _time: wd === 2 ? t.tuesday_time : t.wednesday_time }));
+  } else {
+    dailyTemplates = db.prepare(
+      "SELECT * FROM daily_quest_templates WHERE time IS NOT NULL AND tuesday_time IS NULL AND wednesday_time IS NULL AND weekday = ?"
+    ).all(wd).map(t => ({ ...t, _time: t.time }));
+  }
+
+  const daily = dailyTemplates.map(t => ({
+    id: t.id,
+    title: t.title,
+    time: t._time,
+    category: t.category,
+    xp_reward: t.xp_reward,
+    optional: t.optional,
+    kind: 'daily'
+  }));
+
+  // Required (weekly) templates for this day
+  const weeklyTemplates = db.prepare(
+    "SELECT * FROM weekly_quest_templates WHERE weekday = ?"
+  ).all(wd);
+  const required = weeklyTemplates.map(t => ({
+    id: t.id,
+    title: t.title,
+    time: t.time,
+    category: t.category,
+    xp_reward: t.xp_reward,
+    optional: t.optional,
+    kind: 'required'
+  }));
+
+  // Merge and sort by time (parse "6 AM" / "9:15 AM" to minutes)
+  const toMinutes = (s) => {
+    if (!s) return 9999;
+    const m = s.match(/(\d{1,2})(?::(\d{2}))?\s*(AM|PM)/i);
+    if (!m) return 9999;
+    let h = parseInt(m[1], 10);
+    const min = m[2] ? parseInt(m[2], 10) : 0;
+    const ap = m[3].toUpperCase();
+    if (ap === 'PM' && h !== 12) h += 12;
+    if (ap === 'AM' && h === 12) h = 0;
+    return h * 60 + min;
+  };
+  const all = [...daily, ...required].sort((a, b) => toMinutes(a.time) - toMinutes(b.time));
+
+  res.json({
+    weekday: wd,
+    dailyCount: daily.filter(q => !q.optional).length,
+    requiredCount: required.filter(q => !q.optional).length,
+    quests: all
+  });
+});
+
 app.post("/api/quests/:id/complete", (req, res) => {
   const quest = db.prepare("SELECT * FROM quests WHERE id = ?").get(req.params.id);
   db.prepare("UPDATE quests SET completed = 1 WHERE id = ?").run(req.params.id);
@@ -426,6 +716,32 @@ app.get("/api/gym/history/:exerciseId", async (req, res) => {
     console.error("Hevy /history error:", e.message);
     res.status(500).json({ error: e.message });
   }
+});
+
+// ─── Notepad (single shared scratchpad) ───────────────────────────────────────
+function initNotepad() {
+  db.prepare(`
+    CREATE TABLE IF NOT EXISTS notepad (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      content TEXT NOT NULL DEFAULT ''
+    )
+  `).run();
+  const row = db.prepare("SELECT id FROM notepad WHERE id = 1").get();
+  if (!row) {
+    db.prepare("INSERT INTO notepad (id, content) VALUES (1, '')").run();
+  }
+}
+initNotepad();
+
+app.get("/api/notepad", (req, res) => {
+  const row = db.prepare("SELECT content FROM notepad WHERE id = 1").get();
+  res.json({ content: row ? row.content : '' });
+});
+
+app.patch("/api/notepad", (req, res) => {
+  const { content } = req.body;
+  db.prepare("UPDATE notepad SET content = ? WHERE id = 1").run(content ?? '');
+  res.json({ success: true });
 });
 
 // ─── Food Inventory ───────────────────────────────────────────────────────────
@@ -700,7 +1016,54 @@ app.patch("/api/bookkeeping/bills/:id", (req, res) => {
 });
 
 // ─── Bookkeeping Web UI ───────────────────────────────────────────────────────
-app.get("/bookkeeping", (req, res) => {
+app.get("/notepad", requireAuth, (req, res) => {
+  const row = db.prepare("SELECT content FROM notepad WHERE id = 1").get();
+  const content = (row ? row.content : '').replace(/</g, '&lt;');
+  const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Notepad</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #0a0a1a; color: #ddd; font-family: -apple-system, sans-serif; padding: 16px; }
+  h1 { color: #fff; font-size: 24px; margin-bottom: 4px; }
+  .subtitle { color: #888; font-size: 13px; margin-bottom: 20px; }
+  textarea { width: 100%; min-height: 70vh; background: #12122a; border: 1px solid #2a2a3a; border-radius: 8px; color: #fff; font-size: 15px; padding: 14px; resize: both; font-family: inherit; line-height: 1.5; }
+  .save { margin-top: 12px; background: #1a2a1a; border: 1px solid #2a3a2a; color: #4CAF50; padding: 8px 22px; border-radius: 8px; cursor: pointer; font-size: 14px; font-weight: bold; }
+  .save:hover { background: #24382a; }
+  .toast { position: fixed; bottom: 20px; right: 20px; background: #4CAF50; color: #fff; padding: 10px 18px; border-radius: 8px; font-size: 13px; display: none; z-index: 999; }
+</style>
+</head>
+<body>
+<h1>Notepad</h1>
+<div class="subtitle">Solo Leveling Scratchpad · <a href="/logout" style="color:#7b8cde;">Log out</a></div>
+<textarea id="note" placeholder="Type your notes here...">${content}</textarea>
+<br>
+<button class="save" onclick="saveNote()">Save</button>
+<div class="toast" id="toast">Saved ✓</div>
+<script>
+function showToast() {
+  const t = document.getElementById('toast');
+  t.style.display = 'block';
+  setTimeout(() => t.style.display = 'none', 1500);
+}
+function saveNote() {
+  const content = document.getElementById('note').value;
+  fetch('/api/notepad', {
+    method: 'PATCH',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({content})
+  }).then(() => showToast());
+}
+</script>
+</body>
+</html>`;
+  res.send(html);
+});
+
+app.get("/bookkeeping", requireAuth, (req, res) => {
   ensureCurrentMonth();
   const months = db.prepare("SELECT * FROM bookkeeping_months ORDER BY month DESC").all();
   const todayYm = db.prepare("SELECT strftime('%Y-%m', date('now','localtime')) AS ym").get().ym;
@@ -773,7 +1136,7 @@ app.get("/bookkeeping", (req, res) => {
 </head>
 <body>
 <h1>Bookkeeping</h1>
-<div class="subtitle">Solo Leveling Finance Tracker</div>
+<div class="subtitle">Solo Leveling Finance Tracker · <a href="/logout" style="color:#7b8cde;">Log out</a></div>
 
 <div class="month-selector">
   ${months.slice().sort((a, b) => a.month.localeCompare(b.month)).map(m => {

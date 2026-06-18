@@ -82,158 +82,6 @@ app.get("/logout", (req, res) => {
   res.redirect("/login");
 });
 
-// ─── Decompression Protocol (view-only reference page) ──────────────────────────
-app.get("/protocol", (req, res) => {
-  res.send(`<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Decompression Protocol</title>
-<style>
-  :root {
-    --bg: #060911;
-    --panel: rgba(13, 22, 38, 0.72);
-    --panel-edge: rgba(86, 168, 255, 0.32);
-    --glow: #56b0ff;
-    --glow-soft: rgba(86, 176, 255, 0.55);
-    --ink: #dce8fb;
-    --ink-dim: #7e93b4;
-    --ink-faint: #4d5e7c;
-    --amber: #ffcf6b;
-    --rule: rgba(86, 168, 255, 0.16);
-  }
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  body {
-    background:
-      radial-gradient(circle at 50% -10%, rgba(40, 92, 168, 0.22), transparent 55%),
-      radial-gradient(circle at 50% 120%, rgba(30, 70, 140, 0.16), transparent 50%),
-      var(--bg);
-    color: var(--ink);
-    font-family: "Segoe UI", "SF Pro Display", system-ui, sans-serif;
-    min-height: 100vh;
-    padding: 28px 18px 64px;
-    -webkit-font-smoothing: antialiased;
-  }
-  .wrap { max-width: 620px; margin: 0 auto; }
-  .banner { text-align: center; margin-bottom: 30px; animation: rise 0.7s ease both; }
-  .arrival {
-    font-size: 10px; letter-spacing: 0.42em; color: var(--glow);
-    text-transform: uppercase; margin-bottom: 14px; opacity: 0.85;
-  }
-  .arrival::before, .arrival::after { content: "\u25C6"; margin: 0 10px; font-size: 7px; vertical-align: middle; }
-  .title {
-    font-size: clamp(26px, 7vw, 38px); font-weight: 800; letter-spacing: 0.14em;
-    text-transform: uppercase; color: #fff;
-    text-shadow: 0 0 18px var(--glow-soft), 0 0 42px rgba(86, 168, 255, 0.3); line-height: 1.1;
-  }
-  .subtitle {
-    margin-top: 12px; font-size: 13px; color: var(--ink-dim); letter-spacing: 0.02em;
-    line-height: 1.5; max-width: 440px; margin-left: auto; margin-right: auto;
-  }
-  .keystone {
-    border: 1px solid var(--panel-edge);
-    background: linear-gradient(180deg, rgba(86, 168, 255, 0.08), rgba(13, 22, 38, 0.4));
-    border-radius: 6px; padding: 18px 20px; text-align: center; margin-bottom: 34px;
-    box-shadow: 0 0 26px rgba(86, 168, 255, 0.07) inset; animation: rise 0.7s 0.1s ease both;
-  }
-  .keystone .q { font-size: 19px; font-weight: 700; color: #fff; letter-spacing: 0.03em; }
-  .keystone .q span { color: var(--glow); }
-  .keystone .note { font-size: 11.5px; color: var(--ink-faint); margin-top: 8px; letter-spacing: 0.04em; }
-  .panel {
-    border: 1px solid var(--rule); background: var(--panel); border-radius: 6px;
-    margin-bottom: 18px; overflow: hidden; backdrop-filter: blur(3px); animation: rise 0.7s ease both;
-  }
-  .panel.p1 { animation-delay: 0.18s; }
-  .panel.p2 { animation-delay: 0.26s; }
-  .panel.p3 { animation-delay: 0.34s; }
-  .phead {
-    display: flex; align-items: baseline; gap: 12px; padding: 15px 18px 12px;
-    border-bottom: 1px solid var(--rule); border-left: 3px solid var(--glow);
-  }
-  .pnum { font-size: 11px; font-weight: 700; color: var(--glow); letter-spacing: 0.1em; font-variant-numeric: tabular-nums; }
-  .pstate { font-size: 16px; font-weight: 700; color: #fff; letter-spacing: 0.02em; }
-  .pcue { margin-left: auto; font-size: 10.5px; color: var(--ink-dim); font-style: italic; text-align: right; max-width: 46%; }
-  .pbody { padding: 6px 18px 16px; }
-  .move { display: flex; gap: 12px; padding: 11px 0; border-bottom: 1px solid rgba(86, 168, 255, 0.07); }
-  .move:last-child { border-bottom: none; }
-  .mtick { color: var(--glow); font-size: 12px; flex-shrink: 0; margin-top: 3px; opacity: 0.8; }
-  .mtext { font-size: 14px; line-height: 1.5; }
-  .mtext b { color: #fff; font-weight: 600; }
-  .mtext .why { color: var(--ink-dim); }
-  .slip {
-    margin-top: 30px; border: 1px dashed rgba(255, 207, 107, 0.4); border-radius: 6px;
-    padding: 16px 20px; background: rgba(255, 207, 107, 0.04); animation: rise 0.7s 0.42s ease both;
-  }
-  .slip .label { font-size: 10px; letter-spacing: 0.28em; color: var(--amber); text-transform: uppercase; margin-bottom: 8px; }
-  .slip p { font-size: 13px; line-height: 1.6; color: var(--ink); }
-  .slip p b { color: var(--amber); font-weight: 600; }
-  .foot { text-align: center; margin-top: 28px; font-size: 10px; letter-spacing: 0.24em; color: var(--ink-faint); text-transform: uppercase; }
-  @keyframes rise { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: translateY(0); } }
-  @media (prefers-reduced-motion: reduce) { * { animation: none !important; } }
-</style>
-</head>
-<body>
-  <div class="wrap">
-    <header class="banner">
-      <h1 class="title">Decompression<br>Protocol</h1>
-      <p class="subtitle">When you're depleted and the urge shows up, don't negotiate. Identify the state, then pick from its list. The decision is already made.</p>
-    </header>
-
-    <div class="keystone">
-      <div class="q">Which <span>tired</span> am I?</div>
-      <div class="note">Answer that first \u2014 then go straight to the matching block.</div>
-    </div>
-
-    <section class="panel p1">
-      <div class="phead">
-        <span class="pnum">01</span>
-        <span class="pstate">Wired but tired</span>
-        <span class="pcue">stress energy, can't settle</span>
-      </div>
-      <div class="pbody">
-        <div class="move"><span class="mtick">\u25B8</span><span class="mtext"><b>Extended breath work.</b> <span class="why">90-second practice stretched to 5 min, long exhales. Same reset the urge reaches for.</span></span></div>
-        <div class="move"><span class="mtick">\u25B8</span><span class="mtext"><b>Short walk or the walking pad.</b> <span class="why">Burns the restless energy off, low effort.</span></span></div>
-        <div class="move"><span class="mtick">\u25B8</span><span class="mtext"><b>Cold water on the face / step outside.</b> <span class="why">Breaks the loop in under a minute.</span></span></div>
-      </div>
-    </section>
-
-    <section class="panel p2">
-      <div class="phead">
-        <span class="pnum">02</span>
-        <span class="pstate">Flat-out depleted</span>
-        <span class="pcue">no energy, just want to check out</span>
-      </div>
-      <div class="pbody">
-        <div class="move"><span class="mtick">\u25B8</span><span class="mtext"><b>An anime episode, fully.</b> <span class="why">Pick before, not mid-scroll. Solo Leveling, JJK, whatever's queued.</span></span></div>
-        <div class="move"><span class="mtick">\u25B8</span><span class="mtext"><b>EDM set, headphones, lights low.</b> <span class="why">Pure decompression, no output required.</span></span></div>
-        <div class="move"><span class="mtick">\u25B8</span><span class="mtext"><b>Volcano session</b> <span class="why">paired with either of the above.</span></span></div>
-        <div class="move"><span class="mtick">\u25B8</span><span class="mtext"><b>A real 20-minute lie-down.</b> <span class="why">Sometimes the honest move is rest, not a technique.</span></span></div>
-      </div>
-    </section>
-
-    <section class="panel p3">
-      <div class="phead">
-        <span class="pnum">03</span>
-        <span class="pstate">Bored-restless</span>
-        <span class="pcue">idle hands, evening gap</span>
-      </div>
-      <div class="pbody">
-        <div class="move"><span class="mtick">\u25B8</span><span class="mtext"><b>A gaming session.</b> <span class="why">Already enjoy it \u2014 have it ready to go.</span></span></div>
-        <div class="move"><span class="mtick">\u25B8</span><span class="mtext"><b>Hit up friends / text someone.</b> <span class="why">Social contact is a strong state-changer, easy to skip when tired.</span></span></div>
-      </div>
-    </section>
-
-    <div class="slip">
-      <div class="label">If you slip</div>
-      <p>It's <b>data, not failure.</b> Note which state you were in and whether the right option was actually queued up. A slip usually means the list was empty \u2014 that's fixable. The shame spiral causes more relapses than the slip itself.</p>
-    </div>
-
-  </div>
-</body>
-</html>`);
-});
-
 // ─── Hevy Config ──────────────────────────────────────────────────────────────
 const HEVY_API_KEY = "d4b36ead-42d1-4916-9055-3ddb36d123f1";
 const KG_TO_LBS = 2.20462;
@@ -741,6 +589,32 @@ app.get("/api/notepad", (req, res) => {
 app.patch("/api/notepad", (req, res) => {
   const { content } = req.body;
   db.prepare("UPDATE notepad SET content = ? WHERE id = 1").run(content ?? '');
+  res.json({ success: true });
+});
+
+// ─── NoFap Notepad (separate single shared scratchpad) ─────────────────────────
+function initNofapNotepad() {
+  db.prepare(`
+    CREATE TABLE IF NOT EXISTS nofap_notepad (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      content TEXT NOT NULL DEFAULT ''
+    )
+  `).run();
+  const row = db.prepare("SELECT id FROM nofap_notepad WHERE id = 1").get();
+  if (!row) {
+    db.prepare("INSERT INTO nofap_notepad (id, content) VALUES (1, '')").run();
+  }
+}
+initNofapNotepad();
+
+app.get("/api/nofap-notepad", (req, res) => {
+  const row = db.prepare("SELECT content FROM nofap_notepad WHERE id = 1").get();
+  res.json({ content: row ? row.content : '' });
+});
+
+app.patch("/api/nofap-notepad", (req, res) => {
+  const { content } = req.body;
+  db.prepare("UPDATE nofap_notepad SET content = ? WHERE id = 1").run(content ?? '');
   res.json({ success: true });
 });
 
@@ -1310,6 +1184,15 @@ function initDeliveryTracker() {
   if (!mcols.includes('notes')) {
     db.prepare("ALTER TABLE bookkeeping_months ADD COLUMN notes TEXT DEFAULT ''").run();
   }
+
+  // Migration: add per-day Route 324 rate toggles to delivery_weeks
+  const dcols = db.prepare("PRAGMA table_info(delivery_weeks)").all().map(c => c.name);
+  if (!dcols.includes('tue_route324')) {
+    db.prepare("ALTER TABLE delivery_weeks ADD COLUMN tue_route324 INTEGER NOT NULL DEFAULT 0").run();
+  }
+  if (!dcols.includes('wed_route324')) {
+    db.prepare("ALTER TABLE delivery_weeks ADD COLUMN wed_route324 INTEGER NOT NULL DEFAULT 0").run();
+  }
 }
 
 initDeliveryTracker();
@@ -1353,7 +1236,9 @@ function getWeekStart(dateStr) {
 function weekBillable(w) {
   const tueBillable = Math.max(0, w.tue_delivered - w.tue_duplicates - w.tue_undeliverable);
   const wedBillable = Math.max(0, w.wed_delivered - w.wed_duplicates - w.wed_undeliverable);
-  return (tueBillable + wedBillable) * 1.60;
+  const tueRate = w.tue_route324 ? 1.90 : 1.60;
+  const wedRate = w.wed_route324 ? 1.90 : 1.60;
+  return tueBillable * tueRate + wedBillable * wedRate;
 }
 
 // Pay date for a delivery week = that week's Wednesday (week_start + 3) + 16 days
@@ -1428,7 +1313,7 @@ app.get("/api/delivery-weeks", (req, res) => {
 });
 
 app.patch("/api/delivery-weeks/:id", (req, res) => {
-  const { tue_delivered, tue_duplicates, tue_undeliverable, wed_delivered, wed_duplicates, wed_undeliverable } = req.body;
+  const { tue_delivered, tue_duplicates, tue_undeliverable, wed_delivered, wed_duplicates, wed_undeliverable, tue_route324, wed_route324 } = req.body;
   const week = db.prepare("SELECT * FROM delivery_weeks WHERE id = ?").get(req.params.id);
   if (!week) return res.status(404).json({ error: "Week not found" });
   db.prepare(`
@@ -1438,7 +1323,9 @@ app.patch("/api/delivery-weeks/:id", (req, res) => {
       tue_undeliverable = ?,
       wed_delivered = ?,
       wed_duplicates = ?,
-      wed_undeliverable = ?
+      wed_undeliverable = ?,
+      tue_route324 = ?,
+      wed_route324 = ?
     WHERE id = ?
   `).run(
     tue_delivered ?? week.tue_delivered,
@@ -1447,6 +1334,8 @@ app.patch("/api/delivery-weeks/:id", (req, res) => {
     wed_delivered ?? week.wed_delivered,
     wed_duplicates ?? week.wed_duplicates,
     wed_undeliverable ?? week.wed_undeliverable,
+    (tue_route324 ?? week.tue_route324) ? 1 : 0,
+    (wed_route324 ?? week.wed_route324) ? 1 : 0,
     req.params.id
   );
   res.json(db.prepare("SELECT * FROM delivery_weeks WHERE id = ?").get(req.params.id));

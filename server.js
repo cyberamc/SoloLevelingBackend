@@ -912,25 +912,39 @@ app.get("/notepad", requireAuth, (req, res) => {
 </head>
 <body>
 <h1>Notepad</h1>
-<div class="subtitle">Solo Leveling Scratchpad · <a href="/logout" style="color:#7b8cde;">Log out</a></div>
+<div class="subtitle">Solo Leveling Scratchpad · <span id="save-status">Saved</span> · <a href="/logout" style="color:#7b8cde;">Log out</a></div>
 <textarea id="note" placeholder="Type your notes here...">${content}</textarea>
-<br>
-<button class="save" onclick="saveNote()">Save</button>
-<div class="toast" id="toast">Saved ✓</div>
 <script>
-function showToast() {
-  const t = document.getElementById('toast');
-  t.style.display = 'block';
-  setTimeout(() => t.style.display = 'none', 1500);
-}
-function saveNote() {
-  const content = document.getElementById('note').value;
-  fetch('/api/notepad', {
+const noteEl = document.getElementById('note');
+const statusEl = document.getElementById('save-status');
+let saveTimer = null;
+let lastSaved = noteEl.value;
+
+function doSave() {
+  const content = noteEl.value;
+  if (content === lastSaved) return;
+  statusEl.textContent = 'Saving...';
+  return fetch('/api/notepad', {
     method: 'PATCH',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({content})
-  }).then(() => showToast());
+  }).then(() => { lastSaved = content; statusEl.textContent = 'Saved'; })
+    .catch(() => { statusEl.textContent = 'Save failed'; });
 }
+noteEl.addEventListener('input', () => {
+  statusEl.textContent = 'Editing...';
+  if (saveTimer) clearTimeout(saveTimer);
+  saveTimer = setTimeout(doSave, 1500);
+});
+// Save on exit (navigating away / closing tab)
+window.addEventListener('beforeunload', () => {
+  if (noteEl.value !== lastSaved) {
+    navigator.sendBeacon('/api/notepad', new Blob([JSON.stringify({content: noteEl.value})], {type: 'application/json'}));
+  }
+});
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden' && noteEl.value !== lastSaved) doSave();
+});
 </script>
 </body>
 </html>`;
@@ -1029,9 +1043,8 @@ app.get("/bookkeeping", requireAuth, (req, res) => {
   <div class="summary-box"><div class="label">Total Expenses</div><div class="value" style="color:#CF6679">$${totalExpenses.toFixed(2)}</div></div>
   <div class="summary-box"><div class="label">Plasma</div><div class="value" style="color:#4CAF50">$520.00</div></div>
   <div class="summary-box notes-box">
-    <div class="label">Notes</div>
-    <textarea id="month-notes" class="notes-input" placeholder="Add a note...">${(currentMonth.notes || '').replace(/</g, '&lt;')}</textarea>
-    <button class="notes-save" onclick="saveNotes(${currentMonth.id})">Save</button>
+    <div class="label">Notes · <span id="notes-status" style="color:#4CAF50;">Saved</span></div>
+    <textarea id="month-notes" class="notes-input" placeholder="Add a note..." data-month="${currentMonth.id}">${(currentMonth.notes || '').replace(/</g, '&lt;')}</textarea>
   </div>
 </div>
 
@@ -1124,19 +1137,42 @@ function deleteMonth(id, label) {
     .then(r => r.json()).then(() => { location.href = '/bookkeeping'; });
 }
 
-function saveNotes(monthId) {
-  const notes = document.getElementById('month-notes').value;
-  fetch('/api/bookkeeping/' + monthId + '/notes', {
-    method: 'PATCH',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({notes})
-  }).then(() => showToast());
-}
-
-// Remember the notes box size across page loads (per browser)
+// Bookkeeping notes autosave (debounced + on exit)
 (function () {
   const ta = document.getElementById('month-notes');
+  const statusEl = document.getElementById('notes-status');
   if (!ta) return;
+  const monthId = ta.getAttribute('data-month');
+  let saveTimer = null;
+  let lastSaved = ta.value;
+
+  function doSave() {
+    const notes = ta.value;
+    if (notes === lastSaved) return;
+    if (statusEl) statusEl.textContent = 'Saving...';
+    return fetch('/api/bookkeeping/' + monthId + '/notes', {
+      method: 'PATCH',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({notes})
+    }).then(() => { lastSaved = notes; if (statusEl) statusEl.textContent = 'Saved'; })
+      .catch(() => { if (statusEl) statusEl.textContent = 'Save failed'; });
+  }
+  ta.addEventListener('input', () => {
+    if (statusEl) statusEl.textContent = 'Editing...';
+    if (saveTimer) clearTimeout(saveTimer);
+    saveTimer = setTimeout(doSave, 1500);
+  });
+  window.addEventListener('beforeunload', () => {
+    if (ta.value !== lastSaved) {
+      navigator.sendBeacon('/api/bookkeeping/' + monthId + '/notes',
+        new Blob([JSON.stringify({notes: ta.value})], {type: 'application/json'}));
+    }
+  });
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden' && ta.value !== lastSaved) doSave();
+  });
+
+  // Remember the notes box size across page loads (per browser)
   try {
     const saved = JSON.parse(localStorage.getItem('notesBoxSize') || 'null');
     if (saved && saved.w && saved.h) { ta.style.width = saved.w; ta.style.height = saved.h; }

@@ -165,9 +165,12 @@ function generateWeeklyQuests() {
   const templates = db.prepare("SELECT * FROM weekly_quest_templates").all();
   const insert = db.prepare("INSERT INTO weekly_quests (template_id, title, weekday, category, xp_reward, created_date, optional) VALUES (?, ?, ?, ?, ?, ?, ?)");
   templates.forEach(t => {
-    const exists = db.prepare("SELECT COUNT(*) as count FROM weekly_quests WHERE template_id = ?").get(t.id);
+    const questTitle = t.time ? t.title + " @ " + t.time : t.title;
+    // Dedupe on title+weekday (NOT template_id): a template rebuild assigns new
+    // template_ids, so matching on template_id would wrongly re-insert an existing
+    // task and create duplicates. Title+weekday is the task's real identity for the day.
+    const exists = db.prepare("SELECT COUNT(*) as count FROM weekly_quests WHERE title = ? AND weekday = ?").get(questTitle, t.weekday);
     if (exists.count === 0) {
-      const questTitle = t.time ? t.title + " @ " + t.time : t.title;
       insert.run(t.id, questTitle, t.weekday, t.category, t.xp_reward, today, t.optional);
     }
   });

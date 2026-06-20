@@ -795,9 +795,36 @@ app.get("/api/bookkeeping", (req, res) => {
   res.json(months);
 });
 
+// Auto-set autopay bills to PAID on/after their due date.
+// Due day is parsed from the bill name, e.g. "Amazon Prime (14th)" -> 14.
+// Guard: only act when the viewed month is the current calendar month or earlier
+// (never pre-pay a future month). Only flips bills not already PAID.
+function autopayCatchUp(monthId, monthStr) {
+  const today = db.prepare("SELECT date('now','localtime') AS d").get().d; // YYYY-MM-DD
+  const curYm = today.slice(0, 7);
+  if (monthStr > curYm) return; // future month: don't pre-pay
+  const todayDay = parseInt(today.slice(8, 10), 10);
+  // If viewing a past month, every due date has already passed.
+  const pastMonth = monthStr < curYm;
+  const bills = db.prepare(
+    "SELECT id, name, status FROM bookkeeping_bills WHERE month_id = ? AND autopay = 1 AND status != 'PAID'"
+  ).all(monthId);
+  const upd = db.prepare("UPDATE bookkeeping_bills SET status = 'PAID' WHERE id = ?");
+  const tx = db.transaction(() => {
+    bills.forEach(b => {
+      const m = b.name.match(/\((\d{1,2})(?:st|nd|rd|th)\)/i);
+      if (!m) return;
+      const dueDay = parseInt(m[1], 10);
+      if (pastMonth || todayDay >= dueDay) upd.run(b.id);
+    });
+  });
+  tx();
+}
+
 app.get("/api/bookkeeping/:monthId", (req, res) => {
   const month = db.prepare("SELECT * FROM bookkeeping_months WHERE id = ?").get(req.params.monthId);
   if (!month) return res.status(404).json({ error: "Month not found" });
+  autopayCatchUp(month.id, month.month);
   const bills = db.prepare("SELECT * FROM bookkeeping_bills WHERE month_id = ? ORDER BY sort_order").all(req.params.monthId);
 
   // Ensure this month's delivery weeks exist, then compute SpeedX from them
@@ -861,10 +888,10 @@ function seedBillsFromPreviousMonth(newMonthId, newMonthStr) {
   if (!prev) return;
   const srcBills = db.prepare("SELECT * FROM bookkeeping_bills WHERE month_id = ? ORDER BY sort_order").all(prev.id);
   const insert = db.prepare(
-    "INSERT INTO bookkeeping_bills (month_id, group_name, name, amount, status, sort_order) VALUES (?, ?, ?, ?, 'NOT PAID', ?)"
+    "INSERT INTO bookkeeping_bills (month_id, group_name, name, amount, status, sort_order, autopay) VALUES (?, ?, ?, ?, 'NOT PAID', ?, ?)"
   );
   const tx = db.transaction(() => {
-    srcBills.forEach(b => insert.run(newMonthId, b.group_name, b.name, b.amount, b.sort_order));
+    srcBills.forEach(b => insert.run(newMonthId, b.group_name, b.name, b.amount, b.sort_order, b.autopay ? 1 : 0));
   });
   tx();
 }
@@ -1010,6 +1037,7 @@ app.get("/bookkeeping", requireAuth, (req, res) => {
   .bill-row { display: flex; align-items: center; padding: 8px 0; border-bottom: 1px solid #1a1a2e; gap: 8px; }
   .bill-row:last-child { border-bottom: none; }
   .bill-name { font-size: 13px; color: #ccc; flex: 1; }
+  .autopay-badge { font-size: 9px; font-weight: bold; color: #D4B84A; background: #D4B84A22; border: 1px solid #D4B84A44; border-radius: 4px; padding: 1px 5px; margin-left: 6px; letter-spacing: 0.5px; vertical-align: middle; }
   .bill-amount { font-size: 13px; color: #fff; font-weight: 600; min-width: 48px; text-align: right; }
   .bill-amount input { background: #0e0e1e; border: 1px solid #2a2a3a; border-radius: 4px; color: #fff; font-size: 13px; width: 70px; padding: 4px 6px; text-align: right; }
   .status-btn { border: none; border-radius: 6px; padding: 4px 0; font-size: 11px; font-weight: bold; cursor: pointer; white-space: nowrap; width: 80px; text-align: center; }
@@ -1071,7 +1099,7 @@ app.get("/bookkeeping", requireAuth, (req, res) => {
     groupBills.forEach(bill => {
       const color = statusColors[bill.status] || '#888';
       html += `<div class="bill-row">
-        <span class="bill-name">${bill.name}</span>
+        <span class="bill-name">${bill.name}${bill.autopay ? '<span class="autopay-badge">AUTOPAY</span>' : ''}</span>
         <input type="number" value="${bill.amount}" onchange="updateAmount(${bill.id}, this.value)" style="background:#0e0e1e;border:1px solid #2a2a3a;border-radius:4px;color:#fff;font-size:12px;flex:0 0 65px;box-sizing:border-box;width:65px;padding:3px 5px;text-align:right;">
         <button class="status-btn" style="background:${color}22;color:${color};border:1px solid ${color}44" onclick="cycleStatus(${bill.id}, this)">${bill.status}</button>
       </div>`;
@@ -1222,6 +1250,12 @@ function initDeliveryTracker() {
   const mcols = db.prepare("PRAGMA table_info(bookkeeping_months)").all().map(c => c.name);
   if (!mcols.includes('notes')) {
     db.prepare("ALTER TABLE bookkeeping_months ADD COLUMN notes TEXT DEFAULT ''").run();
+  }
+
+  // Migration: add autopay flag to bookkeeping_bills (badge + auto-PAID-on-due-date)
+  const bcols = db.prepare("PRAGMA table_info(bookkeeping_bills)").all().map(c => c.name);
+  if (!bcols.includes('autopay')) {
+    db.prepare("ALTER TABLE bookkeeping_bills ADD COLUMN autopay INTEGER NOT NULL DEFAULT 0").run();
   }
 
   // Migration: add per-day Route 324 rate toggles to delivery_weeks

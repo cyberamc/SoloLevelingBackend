@@ -1180,7 +1180,7 @@ app.get("/bookkeeping", requireAuth, (req, res) => {
     html += `<div class="card">
       <div class="card-header">
         <div class="card-title">${groupName}</div>
-        ${income ? `<div class="card-income">$${income.toFixed(0)}</div>` : ''}
+        ${income ? `<div class="card-income">$${income.toFixed(0)} income · $${groupTotal.toFixed(0)} bills</div>` : (groupTotal > 0 ? `<div class="card-income" style="color:#888">$${groupTotal.toFixed(0)} bills</div>` : '')}
       </div>`;
 
     groupBills.forEach(bill => {

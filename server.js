@@ -801,12 +801,11 @@ const FIXED_INCOME = {
   'Plasma': 520
 };
 
-// Per-card income labels only — NOT counted in Total Income
-// (People is a reimbursement, Subscriptions is an expense bucket)
+// Per-card income labels only — NOT counted in Total Income.
+// People and Subscriptions intentionally excluded: People shows a live "Owed" total
+// (computed from its bills) and Subscriptions shows only its bills total.
 const GROUP_INCOME_LABELS = {
-  ...FIXED_INCOME,
-  'People': 135,
-  'Subscriptions': 61
+  ...FIXED_INCOME
 };
 
 const GROUP_ORDER = [
@@ -1170,17 +1169,24 @@ app.get("/bookkeeping", requireAuth, (req, res) => {
 
   const allGroups = [...GROUP_ORDER, ...Object.keys(groups).filter(g => !GROUP_ORDER.includes(g) && g !== 'Plasma')];
 
+  // People reimbursements fund the Subscriptions bucket; compute the People total
+  // (live sum of People bills, excluding ON HOLD) to display on the Subscriptions card.
+  const peopleFunding = (groups['People'] || [])
+    .filter(b => b.status !== 'ON HOLD')
+    .reduce((sum, b) => sum + b.amount, 0);
+
   allGroups.forEach(groupName => {
     const groupBills = groups[groupName];
     if (!groupBills) return;
     const income = (groupName in speedxChecks) ? speedxChecks[groupName] : (GROUP_INCOME_LABELS[groupName] ?? null);
     const groupTotal = groupBills.filter(b => b.status !== 'ON HOLD').reduce((sum, b) => sum + b.amount, 0);
-    const remaining = (income !== null && groupName !== 'People' && groupName !== 'Subscriptions') ? income - groupTotal : null;
+    const remaining = (income !== null && groupName !== 'People' && groupName !== 'Subscriptions') ? income - groupTotal
+      : (groupName === 'Subscriptions' ? peopleFunding - groupTotal : null);
 
     html += `<div class="card">
       <div class="card-header">
         <div class="card-title">${groupName}</div>
-        ${income ? `<div class="card-income">$${income.toFixed(0)} income · $${groupTotal.toFixed(0)} bills</div>` : (groupTotal > 0 ? `<div class="card-income" style="color:#888">$${groupTotal.toFixed(0)} bills</div>` : '')}
+        ${income ? `<div class="card-income">$${income.toFixed(0)} income · $${groupTotal.toFixed(0)} bills</div>` : (groupName === 'People' ? `<div class="card-income" style="color:#4CAF50">Owed: $${groupTotal.toFixed(0)}</div>` : (groupName === 'Subscriptions' ? `<div class="card-income" style="color:#4CAF50">$${peopleFunding.toFixed(0)} from People · $${groupTotal.toFixed(0)} bills</div>` : (groupTotal > 0 ? `<div class="card-income" style="color:#888">$${groupTotal.toFixed(0)} bills</div>` : '')))}
       </div>`;
 
     groupBills.forEach(bill => {

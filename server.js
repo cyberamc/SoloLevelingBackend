@@ -145,14 +145,14 @@ function generateDailyQuests() {
     } else {
       templates = db.prepare("SELECT * FROM daily_quest_templates WHERE time IS NOT NULL AND tuesday_time IS NULL AND wednesday_time IS NULL AND weekday = ?").all(dayOfWeek);
     }
-    const insert = db.prepare("INSERT INTO quests (title, type, category, xp_reward, created_date, optional) VALUES (?, 'daily', ?, ?, ?, ?)");
+    const insert = db.prepare("INSERT INTO quests (title, type, category, xp_reward, created_date, optional, important) VALUES (?, 'daily', ?, ?, ?, ?, ?)");
     templates.forEach(t => {
       let time = null;
       if (dayOfWeek === 2 && t.tuesday_time) time = t.tuesday_time;
       else if (dayOfWeek === 3 && t.wednesday_time) time = t.wednesday_time;
       else if (t.time) time = t.time;
       if (time) {
-        insert.run(t.title + " @ " + time, t.category, t.xp_reward, today, t.optional);
+        insert.run(t.title + " @ " + time, t.category, t.xp_reward, today, t.optional, t.important || 0);
       }
     });
     console.log("Daily quests generated for " + today);
@@ -362,6 +362,7 @@ app.get("/api/routine/:weekday", (req, res) => {
     category: t.category,
     xp_reward: t.xp_reward,
     optional: t.optional,
+    important: t.important || 0,
     kind: 'daily'
   }));
 
@@ -1358,6 +1359,16 @@ function initDeliveryTracker() {
   }
   if (!dcols.includes('wed_route324')) {
     db.prepare("ALTER TABLE delivery_weeks ADD COLUMN wed_route324 INTEGER NOT NULL DEFAULT 0").run();
+  }
+
+  // Migration: add 'important' flag to daily quests (amber "Don't Skip" badge, reusable)
+  const dqtCols = db.prepare("PRAGMA table_info(daily_quest_templates)").all().map(c => c.name);
+  if (!dqtCols.includes('important')) {
+    db.prepare("ALTER TABLE daily_quest_templates ADD COLUMN important INTEGER NOT NULL DEFAULT 0").run();
+  }
+  const qCols = db.prepare("PRAGMA table_info(quests)").all().map(c => c.name);
+  if (!qCols.includes('important')) {
+    db.prepare("ALTER TABLE quests ADD COLUMN important INTEGER NOT NULL DEFAULT 0").run();
   }
 }
 

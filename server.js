@@ -266,7 +266,10 @@ function generateWeeklyQuests() {
     // the normal weekly quests for this weekday. Clear only the NORMAL weeklies for today
     // (template_id != 0); protocol quests use template_id 0 and are preserved with their
     // completion state across refreshes.
-    db.prepare("DELETE FROM weekly_quests WHERE weekday = ? AND created_date = ? AND template_id != ?").run(todayWeekday, today, PROTOCOL_SENTINEL_ID());
+    // Remove the NORMAL weekly quests for today's weekday. These persist across the week
+    // with their original created_date, so the delete must NOT be scoped to created_date —
+    // otherwise they survive alongside the protocol's required quests (causing duplicates).
+    db.prepare("DELETE FROM weekly_quests WHERE weekday = ? AND template_id != ?").run(todayWeekday, PROTOCOL_SENTINEL_ID());
     const protoReq = db.prepare("SELECT * FROM protocol_routines WHERE day_type = ? AND required = 1 ORDER BY sort_order").all(protoDay);
     const pins = db.prepare("INSERT INTO weekly_quests (template_id, title, weekday, category, xp_reward, created_date, optional) VALUES (?, ?, ?, 'STR', 0, ?, 0)");
     protoReq.forEach(r => {

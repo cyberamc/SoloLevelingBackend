@@ -153,6 +153,13 @@ function initProtocol() {
   if (!db.prepare("SELECT id FROM protocol_state WHERE id = 1").get()) {
     db.prepare("INSERT INTO protocol_state (id, armed_date) VALUES (1, NULL)").run();
   }
+  // Sentinel weekly_quest_template row: protocol-injected required quests must reference
+  // a real template id (weekly_quests.template_id is NOT NULL + FK). This hidden row
+  // (weekday -1) satisfies the constraint and is excluded from normal generation.
+  let sentinel = db.prepare("SELECT id FROM weekly_quest_templates WHERE title = '__PROTOCOL_SENTINEL__'").get();
+  if (!sentinel) {
+    db.prepare("INSERT INTO weekly_quest_templates (title, weekday, category, xp_reward, gold_reward, optional, time) VALUES ('__PROTOCOL_SENTINEL__', -1, 'STR', 0, 0, 1, NULL)").run();
+  }
   // Seed routines once (only if empty)
   const count = db.prepare("SELECT COUNT(*) AS c FROM protocol_routines").get().c;
   if (count === 0) {
@@ -190,6 +197,16 @@ function initProtocol() {
   }
 }
 initProtocol();
+
+// Cached lookup of the sentinel template id used by protocol-injected weekly quests.
+let _protocolSentinelId = null;
+function PROTOCOL_SENTINEL_ID() {
+  if (_protocolSentinelId === null) {
+    const row = db.prepare("SELECT id FROM weekly_quest_templates WHERE title = '__PROTOCOL_SENTINEL__'").get();
+    _protocolSentinelId = row ? row.id : -1;
+  }
+  return _protocolSentinelId;
+}
 
 // Returns 'SAT'|'SUN' if the protocol is armed for today (and today is Sat/Sun), else null.
 function protocolActiveDayType() {
@@ -246,18 +263,23 @@ function generateWeeklyQuests() {
   const protoDay = protocolActiveDayType();
   if (protoDay) {
     // Protocol active: required quests for today come from the temp routine, replacing
-    // the normal weekly quests for this weekday. Remove any normal ones already present today.
-    db.prepare("DELETE FROM weekly_quests WHERE weekday = ? AND created_date = ?").run(todayWeekday, today);
+    // the normal weekly quests for this weekday. Clear only the NORMAL weeklies for today
+    // (template_id != 0); protocol quests use template_id 0 and are preserved with their
+    // completion state across refreshes.
+    db.prepare("DELETE FROM weekly_quests WHERE weekday = ? AND created_date = ? AND template_id != ?").run(todayWeekday, today, PROTOCOL_SENTINEL_ID());
     const protoReq = db.prepare("SELECT * FROM protocol_routines WHERE day_type = ? AND required = 1 ORDER BY sort_order").all(protoDay);
-    const pins = db.prepare("INSERT INTO weekly_quests (template_id, title, weekday, category, xp_reward, created_date, optional) VALUES (NULL, ?, ?, 'STR', 0, ?, 0)");
+    const pins = db.prepare("INSERT INTO weekly_quests (template_id, title, weekday, category, xp_reward, created_date, optional) VALUES (?, ?, ?, 'STR', 0, ?, 0)");
     protoReq.forEach(r => {
       const qt = r.title + " @ " + r.time;
       const exists = db.prepare("SELECT COUNT(*) as count FROM weekly_quests WHERE title = ? AND weekday = ? AND created_date = ?").get(qt, todayWeekday, today);
-      if (exists.count === 0) pins.run(qt, todayWeekday, today);
+      if (exists.count === 0) pins.run(PROTOCOL_SENTINEL_ID(), qt, todayWeekday, today);
     });
     return;
   }
-  const templates = db.prepare("SELECT * FROM weekly_quest_templates").all();
+  // Normal path: purge any leftover protocol-injected weeklies so they don't bleed into
+  // normal days via the weekday reset logic below.
+  db.prepare("DELETE FROM weekly_quests WHERE template_id = ?").run(PROTOCOL_SENTINEL_ID());
+  const templates = db.prepare("SELECT * FROM weekly_quest_templates WHERE title != '__PROTOCOL_SENTINEL__'").all();
   const insert = db.prepare("INSERT INTO weekly_quests (template_id, title, weekday, category, xp_reward, created_date, optional) VALUES (?, ?, ?, ?, ?, ?, ?)");
   templates.forEach(t => {
     const questTitle = t.time ? t.title + " @ " + t.time : t.title;

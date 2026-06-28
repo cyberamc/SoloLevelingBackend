@@ -131,11 +131,92 @@ function getPlayer() {
 }
 
 // ─── Quest Generation ─────────────────────────────────────────────────────────
+// ─── Going-Out Protocol (temp hungover routine for Sat/Sun) ────────────────────
+function initProtocol() {
+  db.prepare(`
+    CREATE TABLE IF NOT EXISTS protocol_routines (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      day_type TEXT NOT NULL,          -- 'SAT' or 'SUN'
+      title TEXT NOT NULL,
+      time TEXT NOT NULL,
+      optional INTEGER NOT NULL DEFAULT 0,
+      required INTEGER NOT NULL DEFAULT 0,
+      sort_order INTEGER NOT NULL DEFAULT 0
+    )
+  `).run();
+  db.prepare(`
+    CREATE TABLE IF NOT EXISTS protocol_state (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      armed_date TEXT
+    )
+  `).run();
+  if (!db.prepare("SELECT id FROM protocol_state WHERE id = 1").get()) {
+    db.prepare("INSERT INTO protocol_state (id, armed_date) VALUES (1, NULL)").run();
+  }
+  // Seed routines once (only if empty)
+  const count = db.prepare("SELECT COUNT(*) AS c FROM protocol_routines").get().c;
+  if (count === 0) {
+    const ins = db.prepare("INSERT INTO protocol_routines (day_type, title, time, optional, required, sort_order) VALUES (?, ?, ?, 0, ?, ?)");
+    const SAT = [
+      ["Wake Up","7:00 AM",0],["Turn Off Front & Back Yard Light","7:15 AM",0],["Put Toby In Backyard","7:15 AM",0],
+      ["Add Ice To Water Jug","7:15 AM",0],["Do Towels & Clothes Laundry","7:20 AM",0],["Turn On Air Humidifier","7:25 AM",0],
+      ["Make Pre-Workout","7:25 AM",0],["Make Protein Shake","7:30 AM",0],["Vape & Play Rivals","7:35 AM",0],
+      ["Shower","8:05 AM",0],["Organize Quarters","8:30 AM",0],["Prepare Tomorrow's Clothes","8:35 AM",0],
+      ["Walk Toby","8:40 AM",0],["Feed Toby","8:55 AM",0],["Feed Luna","9:00 AM",0],["Prepare Dinner Soda","9:05 AM",0],
+      ["Prepare Food Supply","9:10 AM",1],["Meditate","9:30 AM",0],["Study","9:35 AM",0],
+      ["Turn Off Air Humidifier","10:35 AM",0],["Make Breakfast","10:35 AM",0],["Make Dinner","4:00 PM",0],
+      ["Make Dessert","7:00 PM",0],["Complete Daily Hydration","8:00 PM",0],["Take Evening Supplements","8:30 PM",0],
+      ["Prepare Tomorrow's Hydration","8:35 PM",0],["Prepare Tomorrow's Soda","8:40 PM",0],
+      ["Turn On Front & Back Yard Light","9:00 PM",0],["Walk Toby","9:00 PM",0],["You Didn't Fap Today","9:20 PM",0]
+    ];
+    const SUN = [
+      ["Wake Up","7:00 AM",0],["Turn Off Front & Back Yard Light","7:15 AM",0],["Put Toby In Backyard","7:15 AM",0],
+      ["Add Ice To Water Jug","7:15 AM",0],["Do Sheets & Blankets Laundry","7:20 AM",0],["Turn On Air Humidifier","7:25 AM",0],
+      ["Make Protein Shake","7:25 AM",0],["Vape & Play Rivals","7:30 AM",0],["Shower","8:00 AM",0],
+      ["Organize Quarters","8:30 AM",0],["Walk Toby","8:35 AM",0],["Take Out Trash","8:35 AM",1],
+      ["Prepare Dinner Soda","8:50 AM",0],["Meditate","8:55 AM",0],["Clean Toby's Feeding Station & Refill Water","9:00 AM",1],
+      ["Deep Clean Toby","9:10 AM",1],["Brush Toby","9:20 AM",0],["Brush Toby's Teeth","9:25 AM",1],
+      ["Feed Toby","9:30 AM",0],["Prepare Weekly Supplements","9:35 AM",1],["Prepare Pre-Workout","9:55 AM",0],
+      ["Prepare Tomorrow's Clothes","10:00 AM",0],["Feed Luna","10:00 AM",0],["Clean Volcano","10:05 AM",1],
+      ["Study","10:10 AM",0],["Turn Off Air Humidifier","10:40 AM",0],["Make Breakfast","10:40 AM",0],
+      ["Make Dinner","4:00 PM",0],["Make Dessert","7:00 PM",0],["Complete Daily Hydration","8:00 PM",0],
+      ["Take Evening Supplements","8:30 PM",0],["Prepare Tomorrow's Hydration","8:35 PM",0],
+      ["Prepare Tomorrow's Soda","8:40 PM",0],["Turn On Front & Back Yard Light","9:00 PM",0],
+      ["Walk Toby","9:00 PM",0],["Prepare Water Supply","9:15 PM",0],["You Didn't Fap Today","9:20 PM",0]
+    ];
+    SAT.forEach((r, i) => ins.run("SAT", r[0], r[1], r[2], i + 1));
+    SUN.forEach((r, i) => ins.run("SUN", r[0], r[1], r[2], i + 1));
+    console.log("Protocol routines seeded");
+  }
+}
+initProtocol();
+
+// Returns 'SAT'|'SUN' if the protocol is armed for today (and today is Sat/Sun), else null.
+function protocolActiveDayType() {
+  const today = db.prepare("SELECT date('now','localtime') AS d").get().d;
+  const st = db.prepare("SELECT armed_date FROM protocol_state WHERE id = 1").get();
+  if (!st || !st.armed_date) return null;
+  if (st.armed_date !== today) return null;
+  const wd = db.prepare("SELECT CAST(strftime('%w', ?) AS INTEGER) AS w").get(today).w;
+  if (wd === 6) return "SAT";
+  if (wd === 0) return "SUN";
+  return null;
+}
+
 function generateDailyQuests() {
   const today = db.prepare("SELECT date('now', 'localtime') as today").get().today;
   db.prepare("DELETE FROM quests WHERE type = 'daily' AND created_date < ?").run(today);
   const existing = db.prepare("SELECT COUNT(*) as count FROM quests WHERE created_date = ? AND type = 'daily'").get(today);
   if (existing.count === 0) {
+    const protoDay = protocolActiveDayType();
+    if (protoDay) {
+      // Going-Out Protocol active: daily quests come from the temp routine (non-required rows)
+      const protoRows = db.prepare("SELECT * FROM protocol_routines WHERE day_type = ? AND required = 0 ORDER BY sort_order").all(protoDay);
+      const pins = db.prepare("INSERT INTO quests (title, type, category, xp_reward, created_date, optional, important) VALUES (?, 'daily', 'STR', 0, ?, 0, 0)");
+      protoRows.forEach(r => pins.run(r.title + " @ " + r.time, today));
+      console.log("Protocol daily quests generated (" + protoDay + ") for " + today);
+      return;
+    }
     const dayResult = db.prepare("SELECT CAST(strftime('%w', ?) AS INTEGER) as dayOfWeek").get(today);
     const dayOfWeek = dayResult.dayOfWeek;
     const isDeliveryDay = dayOfWeek === 2 || dayOfWeek === 3;
@@ -162,6 +243,20 @@ function generateDailyQuests() {
 function generateWeeklyQuests() {
   const today = db.prepare("SELECT date('now', 'localtime') as today").get().today;
   const todayWeekday = db.prepare("SELECT CAST(strftime('%w', 'now', 'localtime') AS INTEGER) as dayOfWeek").get().dayOfWeek;
+  const protoDay = protocolActiveDayType();
+  if (protoDay) {
+    // Protocol active: required quests for today come from the temp routine, replacing
+    // the normal weekly quests for this weekday. Remove any normal ones already present today.
+    db.prepare("DELETE FROM weekly_quests WHERE weekday = ? AND created_date = ?").run(todayWeekday, today);
+    const protoReq = db.prepare("SELECT * FROM protocol_routines WHERE day_type = ? AND required = 1 ORDER BY sort_order").all(protoDay);
+    const pins = db.prepare("INSERT INTO weekly_quests (template_id, title, weekday, category, xp_reward, created_date, optional) VALUES (NULL, ?, ?, 'STR', 0, ?, 0)");
+    protoReq.forEach(r => {
+      const qt = r.title + " @ " + r.time;
+      const exists = db.prepare("SELECT COUNT(*) as count FROM weekly_quests WHERE title = ? AND weekday = ? AND created_date = ?").get(qt, todayWeekday, today);
+      if (exists.count === 0) pins.run(qt, todayWeekday, today);
+    });
+    return;
+  }
   const templates = db.prepare("SELECT * FROM weekly_quest_templates").all();
   const insert = db.prepare("INSERT INTO weekly_quests (template_id, title, weekday, category, xp_reward, created_date, optional) VALUES (?, ?, ?, ?, ?, ?, ?)");
   templates.forEach(t => {
@@ -308,6 +403,8 @@ app.get("/api/player", (req, res) => {
 });
 
 app.get("/api/quests", (req, res) => {
+  // Auto-disarm: clear protocol once its armed date is in the past.
+  db.prepare("UPDATE protocol_state SET armed_date = NULL WHERE armed_date IS NOT NULL AND armed_date < date('now','localtime')").run();
   generateDailyQuests();
   generateWeeklyQuests();
   const today = db.prepare("SELECT date('now', 'localtime') as today").get().today;
@@ -322,6 +419,44 @@ app.get("/api/quests", (req, res) => {
     weekliesCompleted: req_weekly.filter(q => q.completed).length,
     hasWeeklyQuests: req_weekly.length > 0
   });
+});
+
+// ─── Going-Out Protocol API ────────────────────────────────────────────────────
+// GET state: whether armed and for what date/day; plus which day_type arming now would target.
+app.get("/api/protocol", (req, res) => {
+  const today = db.prepare("SELECT date('now','localtime') AS d").get().d;
+  const todayWd = db.prepare("SELECT CAST(strftime('%w', ?) AS INTEGER) AS w").get(today).w;
+  const st = db.prepare("SELECT armed_date FROM protocol_state WHERE id = 1").get();
+  // Arming is only allowed Fri (5) or Sat (6) night, targeting tomorrow (Sat or Sun).
+  let armable = null;
+  if (todayWd === 5) armable = "SAT";
+  else if (todayWd === 6) armable = "SUN";
+  // Resolve armed state to a day label if still in the future/today.
+  let armedDay = null;
+  if (st && st.armed_date) {
+    const awd = db.prepare("SELECT CAST(strftime('%w', ?) AS INTEGER) AS w").get(st.armed_date).w;
+    armedDay = awd === 6 ? "SAT" : (awd === 0 ? "SUN" : null);
+  }
+  res.json({ armedDate: st ? st.armed_date : null, armedDay, armable, today });
+});
+
+// POST arm: arms the protocol for tomorrow. Only valid Fri->Sat or Sat->Sun.
+app.post("/api/protocol/arm", (req, res) => {
+  const today = db.prepare("SELECT date('now','localtime') AS d").get().d;
+  const todayWd = db.prepare("SELECT CAST(strftime('%w', ?) AS INTEGER) AS w").get(today).w;
+  if (todayWd !== 5 && todayWd !== 6) {
+    return res.status(400).json({ error: "Protocol can only be armed on Friday or Saturday night." });
+  }
+  const tomorrow = db.prepare("SELECT date('now','localtime','+1 day') AS d").get().d;
+  db.prepare("UPDATE protocol_state SET armed_date = ? WHERE id = 1").run(tomorrow);
+  const twd = db.prepare("SELECT CAST(strftime('%w', ?) AS INTEGER) AS w").get(tomorrow).w;
+  res.json({ success: true, armedDate: tomorrow, armedDay: twd === 6 ? "SAT" : "SUN" });
+});
+
+// POST disarm: clears the armed state.
+app.post("/api/protocol/disarm", (req, res) => {
+  db.prepare("UPDATE protocol_state SET armed_date = NULL WHERE id = 1").run();
+  res.json({ success: true });
 });
 
 app.get("/api/weekly-quests/all", (req, res) => {

@@ -433,13 +433,27 @@ app.get("/api/quests", (req, res) => {
   const daily = db.prepare("SELECT * FROM quests WHERE created_date = ? AND type = 'daily' ORDER BY id").all(today);
   const weekly = db.prepare("SELECT * FROM weekly_quests ORDER BY weekday, optional, completed").all();
   const req_weekly = weekly.filter(q => !q.optional);
+  // Protocol state for the main Tasks screen: activeToday = recovery routine is live now;
+  // armedDay = armed for an upcoming day (banner). Both derived from armed_date.
+  const protoToday = protocolActiveDayType(); // 'SAT'|'SUN'|null when armed_date == today
+  const protoState = db.prepare("SELECT armed_date FROM protocol_state WHERE id = 1").get();
+  let armedDay = null;
+  if (protoState && protoState.armed_date) {
+    const awd = db.prepare("SELECT CAST(strftime('%w', ?) AS INTEGER) AS w").get(protoState.armed_date).w;
+    armedDay = awd === 6 ? "SAT" : (awd === 0 ? "SUN" : null);
+  }
   res.json({
     dailyQuests: daily,
     weeklyQuests: weekly,
     dailiesCompleted: daily.filter(q => q.completed && !q.optional).length,
     totalDailies: daily.filter(q => !q.optional).length,
     weekliesCompleted: req_weekly.filter(q => q.completed).length,
-    hasWeeklyQuests: req_weekly.length > 0
+    hasWeeklyQuests: req_weekly.length > 0,
+    protocol: {
+      activeToday: protoToday,                       // 'SAT'|'SUN'|null — recovery routine live today
+      armedDay: armedDay,                            // 'SAT'|'SUN'|null — armed target
+      armedDate: protoState ? protoState.armed_date : null
+    }
   });
 });
 

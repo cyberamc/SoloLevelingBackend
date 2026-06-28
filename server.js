@@ -283,22 +283,38 @@ function generateWeeklyQuests() {
   // normal days via the weekday reset logic below.
   db.prepare("DELETE FROM weekly_quests WHERE template_id = ?").run(PROTOCOL_SENTINEL_ID());
   const templates = db.prepare("SELECT * FROM weekly_quest_templates WHERE title != '__PROTOCOL_SENTINEL__'").all();
-  const insert = db.prepare("INSERT INTO weekly_quests (template_id, title, weekday, category, xp_reward, created_date, optional) VALUES (?, ?, ?, ?, ?, ?, ?)");
+  const insert = db.prepare("INSERT INTO weekly_quests (template_id, title, weekday, category, xp_reward, created_date, optional, monthly) VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
+  // Day-of-month today (1-31) and whether today is the FIRST occurrence of its weekday
+  // this calendar month (true when day-of-month <= 7).
+  const domToday = parseInt(today.slice(8, 10), 10);
+  const isFirstWeekdayOfMonth = domToday <= 7;
   templates.forEach(t => {
     const questTitle = t.time ? t.title + " @ " + t.time : t.title;
+    // Monthly quests only generate on the first occurrence of their weekday in the month,
+    // and only when that day is actually today's weekday.
+    if (t.monthly) {
+      if (t.weekday !== todayWeekday) return;
+      if (!isFirstWeekdayOfMonth) return;
+    }
     // Dedupe on title+weekday (NOT template_id): a template rebuild assigns new
     // template_ids, so matching on template_id would wrongly re-insert an existing
     // task and create duplicates. Title+weekday is the task's real identity for the day.
     const exists = db.prepare("SELECT COUNT(*) as count FROM weekly_quests WHERE title = ? AND weekday = ?").get(questTitle, t.weekday);
     if (exists.count === 0) {
-      insert.run(t.id, questTitle, t.weekday, t.category, t.xp_reward, today, t.optional);
+      insert.run(t.id, questTitle, t.weekday, t.category, t.xp_reward, today, t.optional, t.monthly || 0);
     }
   });
-  const resetResult = db.prepare("UPDATE weekly_quests SET completed = 0, created_date = ? WHERE weekday = ? AND created_date < ?")
+  // Weekly reset: monthly quests are excluded — they should not reappear on later weeks
+  // of the same month, and their once-a-month lifecycle is handled separately below.
+  const resetResult = db.prepare("UPDATE weekly_quests SET completed = 0, created_date = ? WHERE weekday = ? AND created_date < ? AND monthly = 0")
     .run(today, todayWeekday, today);
   if (resetResult.changes > 0) {
     console.log("Reset " + resetResult.changes + " weekly quests for weekday " + todayWeekday);
   }
+  // Monthly lifecycle: remove monthly quest rows created in a previous calendar month so
+  // they regenerate fresh on the first occurrence of their weekday next month. (strftime
+  // '%Y-%m' compares year-month; anything older than the current month is purged.)
+  db.prepare("DELETE FROM weekly_quests WHERE monthly = 1 AND strftime('%Y-%m', created_date) < strftime('%Y-%m', ?)").run(today);
 }
 
 function checkAndUpdateStreak() {
@@ -551,6 +567,7 @@ app.get("/api/routine/:weekday", (req, res) => {
     category: t.category,
     xp_reward: t.xp_reward,
     optional: t.optional,
+    monthly: t.monthly || 0,
     kind: 'required'
   }));
 
@@ -1543,6 +1560,17 @@ function initDeliveryTracker() {
   const qCols = db.prepare("PRAGMA table_info(quests)").all().map(c => c.name);
   if (!qCols.includes('important')) {
     db.prepare("ALTER TABLE quests ADD COLUMN important INTEGER NOT NULL DEFAULT 0").run();
+  }
+
+  // Migration: 'monthly' flag — a required quest that fires only on the first occurrence
+  // of its weekday each calendar month (e.g. first Thursday). Gets a distinct Monthly badge.
+  const wqtCols = db.prepare("PRAGMA table_info(weekly_quest_templates)").all().map(c => c.name);
+  if (!wqtCols.includes('monthly')) {
+    db.prepare("ALTER TABLE weekly_quest_templates ADD COLUMN monthly INTEGER NOT NULL DEFAULT 0").run();
+  }
+  const wqCols = db.prepare("PRAGMA table_info(weekly_quests)").all().map(c => c.name);
+  if (!wqCols.includes('monthly')) {
+    db.prepare("ALTER TABLE weekly_quests ADD COLUMN monthly INTEGER NOT NULL DEFAULT 0").run();
   }
 }
 

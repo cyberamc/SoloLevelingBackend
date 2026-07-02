@@ -828,17 +828,6 @@ function initSideTasks() {
 }
 initSideTasks();
 
-app.get("/api/side-tasks", (req, res) => {
-  const row = db.prepare("SELECT content FROM side_tasks WHERE id = 1").get();
-  res.json({ content: row ? row.content : '' });
-});
-
-app.patch("/api/side-tasks", (req, res) => {
-  const { content } = req.body;
-  db.prepare("UPDATE side_tasks SET content = ? WHERE id = 1").run(content ?? '');
-  res.json({ success: true });
-});
-
 // ─── Food Inventory ───────────────────────────────────────────────────────────
 function initFoodInventory() {
   db.prepare(`
@@ -1198,66 +1187,6 @@ document.addEventListener('visibilitychange', () => {
   res.send(html);
 });
 
-app.get("/side-tasks", requireAuth, (req, res) => {
-  const row = db.prepare("SELECT content FROM side_tasks WHERE id = 1").get();
-  const content = (row ? row.content : '').replace(/</g, '&lt;');
-  const html = `<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Side Tasks</title>
-<style>
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { background: #0a0a1a; color: #ddd; font-family: -apple-system, sans-serif; padding: 16px; }
-  h1 { color: #fff; font-size: 24px; margin-bottom: 4px; }
-  .subtitle { color: #888; font-size: 13px; margin-bottom: 20px; }
-  textarea { width: 100%; min-height: 70vh; background: #12122a; border: 1px solid #2a2a3a; border-radius: 8px; color: #fff; font-size: 15px; padding: 14px; resize: both; font-family: inherit; line-height: 1.5; }
-  .save { margin-top: 12px; background: #1a2a1a; border: 1px solid #2a3a2a; color: #4CAF50; padding: 8px 22px; border-radius: 8px; cursor: pointer; font-size: 14px; font-weight: bold; }
-  .save:hover { background: #24382a; }
-  .toast { position: fixed; bottom: 20px; right: 20px; background: #4CAF50; color: #fff; padding: 10px 18px; border-radius: 8px; font-size: 13px; display: none; z-index: 999; }
-</style>
-</head>
-<body>
-<h1>Side Tasks</h1>
-<div class="subtitle">Solo Leveling Scratchpad · <span id="save-status">Saved</span> · <a href="/logout" style="color:#7b8cde;">Log out</a></div>
-<textarea id="note" placeholder="Type your side tasks here...">${content}</textarea>
-<script>
-const noteEl = document.getElementById('note');
-const statusEl = document.getElementById('save-status');
-let saveTimer = null;
-let lastSaved = noteEl.value;
-
-function doSave() {
-  const content = noteEl.value;
-  if (content === lastSaved) return;
-  statusEl.textContent = 'Saving...';
-  return fetch('/api/side-tasks', {
-    method: 'PATCH',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({content})
-  }).then(() => { lastSaved = content; statusEl.textContent = 'Saved'; })
-    .catch(() => { statusEl.textContent = 'Save failed'; });
-}
-noteEl.addEventListener('input', () => {
-  statusEl.textContent = 'Editing...';
-  if (saveTimer) clearTimeout(saveTimer);
-  saveTimer = setTimeout(doSave, 1500);
-});
-// Save on exit (navigating away / closing tab)
-window.addEventListener('beforeunload', () => {
-  if (noteEl.value !== lastSaved) {
-    navigator.sendBeacon('/api/side-tasks', new Blob([JSON.stringify({content: noteEl.value})], {type: 'application/json'}));
-  }
-});
-document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'hidden' && noteEl.value !== lastSaved) doSave();
-});
-</script>
-</body>
-</html>`;
-  res.send(html);
-});
 
 app.get("/bookkeeping", requireAuth, (req, res) => {
   ensureCurrentMonth();

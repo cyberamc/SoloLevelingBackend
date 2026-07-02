@@ -813,21 +813,6 @@ app.patch("/api/nofap-notepad", (req, res) => {
   res.json({ success: true });
 });
 
-// ─── Side Tasks (separate single shared scratchpad) ────────────────────────────
-function initSideTasks() {
-  db.prepare(`
-    CREATE TABLE IF NOT EXISTS side_tasks (
-      id INTEGER PRIMARY KEY CHECK (id = 1),
-      content TEXT NOT NULL DEFAULT ''
-    )
-  `).run();
-  const row = db.prepare("SELECT id FROM side_tasks WHERE id = 1").get();
-  if (!row) {
-    db.prepare("INSERT INTO side_tasks (id, content) VALUES (1, '')").run();
-  }
-}
-initSideTasks();
-
 // ─── Food Inventory ───────────────────────────────────────────────────────────
 function initFoodInventory() {
   db.prepare(`

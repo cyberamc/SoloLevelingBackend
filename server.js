@@ -1465,6 +1465,12 @@ function initDeliveryTracker() {
   if (!dcols.includes('wed_route324')) {
     db.prepare("ALTER TABLE delivery_weeks ADD COLUMN wed_route324 INTEGER NOT NULL DEFAULT 0").run();
   }
+  if (!dcols.includes('tue_route121')) {
+    db.prepare("ALTER TABLE delivery_weeks ADD COLUMN tue_route121 INTEGER NOT NULL DEFAULT 0").run();
+  }
+  if (!dcols.includes('wed_route121')) {
+    db.prepare("ALTER TABLE delivery_weeks ADD COLUMN wed_route121 INTEGER NOT NULL DEFAULT 0").run();
+  }
 
   // Migration: add 'important' flag to daily quests (amber "Don't Skip" badge, reusable)
   const dqtCols = db.prepare("PRAGMA table_info(daily_quest_templates)").all().map(c => c.name);
@@ -1529,8 +1535,8 @@ function getWeekStart(dateStr) {
 function weekBillable(w) {
   const tueBillable = Math.max(0, w.tue_delivered - w.tue_duplicates - w.tue_undeliverable);
   const wedBillable = Math.max(0, w.wed_delivered - w.wed_duplicates - w.wed_undeliverable);
-  const tueRate = w.tue_route324 ? 1.90 : 1.60;
-  const wedRate = w.wed_route324 ? 1.90 : 1.60;
+  const tueRate = w.tue_route324 ? 1.90 : (w.tue_route121 ? 1.80 : 1.60);
+  const wedRate = w.wed_route324 ? 1.90 : (w.wed_route121 ? 1.80 : 1.60);
   return tueBillable * tueRate + wedBillable * wedRate;
 }
 
@@ -1606,9 +1612,16 @@ app.get("/api/delivery-weeks", (req, res) => {
 });
 
 app.patch("/api/delivery-weeks/:id", (req, res) => {
-  const { tue_delivered, tue_duplicates, tue_undeliverable, wed_delivered, wed_duplicates, wed_undeliverable, tue_route324, wed_route324 } = req.body;
+  const { tue_delivered, tue_duplicates, tue_undeliverable, wed_delivered, wed_duplicates, wed_undeliverable, tue_route324, wed_route324, tue_route121, wed_route121 } = req.body;
   const week = db.prepare("SELECT * FROM delivery_weeks WHERE id = ?").get(req.params.id);
   if (!week) return res.status(404).json({ error: "Week not found" });
+  // Resolve flags, then enforce mutual exclusivity per day (Route 324 takes precedence).
+  let t324 = (tue_route324 ?? week.tue_route324) ? 1 : 0;
+  let w324 = (wed_route324 ?? week.wed_route324) ? 1 : 0;
+  let t121 = (tue_route121 ?? week.tue_route121) ? 1 : 0;
+  let w121 = (wed_route121 ?? week.wed_route121) ? 1 : 0;
+  if (t324) t121 = 0;
+  if (w324) w121 = 0;
   db.prepare(`
     UPDATE delivery_weeks SET
       tue_delivered = ?,
@@ -1618,7 +1631,9 @@ app.patch("/api/delivery-weeks/:id", (req, res) => {
       wed_duplicates = ?,
       wed_undeliverable = ?,
       tue_route324 = ?,
-      wed_route324 = ?
+      wed_route324 = ?,
+      tue_route121 = ?,
+      wed_route121 = ?
     WHERE id = ?
   `).run(
     tue_delivered ?? week.tue_delivered,
@@ -1627,8 +1642,7 @@ app.patch("/api/delivery-weeks/:id", (req, res) => {
     wed_delivered ?? week.wed_delivered,
     wed_duplicates ?? week.wed_duplicates,
     wed_undeliverable ?? week.wed_undeliverable,
-    (tue_route324 ?? week.tue_route324) ? 1 : 0,
-    (wed_route324 ?? week.wed_route324) ? 1 : 0,
+    t324, w324, t121, w121,
     req.params.id
   );
   res.json(db.prepare("SELECT * FROM delivery_weeks WHERE id = ?").get(req.params.id));

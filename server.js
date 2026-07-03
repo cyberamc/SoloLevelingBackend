@@ -1,3 +1,4 @@
+require('dotenv').config({ path: __dirname + '/.env', override: true });
 const express = require("express");
 const cors = require("cors");
 const Database = require("better-sqlite3");

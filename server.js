@@ -154,6 +154,11 @@ function initProtocol() {
   if (!db.prepare("SELECT id FROM protocol_state WHERE id = 1").get()) {
     db.prepare("INSERT INTO protocol_state (id, armed_date) VALUES (1, NULL)").run();
   }
+  // No Route Protocol (Tue/Wed same-day) uses its own armed date, independent of Going-Out.
+  const psCols = db.prepare("PRAGMA table_info(protocol_state)").all().map(c => c.name);
+  if (!psCols.includes('noroute_date')) {
+    db.prepare("ALTER TABLE protocol_state ADD COLUMN noroute_date TEXT").run();
+  }
   // Sentinel weekly_quest_template row: protocol-injected required quests must reference
   // a real template id (weekly_quests.template_id is NOT NULL + FK). This hidden row
   // (weekday -1) satisfies the constraint and is excluded from normal generation.
@@ -196,6 +201,38 @@ function initProtocol() {
     SUN.forEach((r, i) => ins.run("SUN", r[0], r[1], r[2], i + 1));
     console.log("Protocol routines seeded");
   }
+  // Seed No Route routines (Tue/Wed) once.
+  const nrCount = db.prepare("SELECT COUNT(*) AS c FROM protocol_routines WHERE day_type IN ('TUE','WED')").get().c;
+  if (nrCount === 0) {
+    const ins2 = db.prepare("INSERT INTO protocol_routines (day_type, title, time, optional, required, sort_order) VALUES (?, ?, ?, 0, ?, ?)");
+    const TUE = [
+      ["Wake Up","6:00 AM",0],["Turn Off Front & Back Yard Light","6:10 AM",0],["Walk Toby","6:10 AM",0],
+      ["Organize Quarters","6:25 AM",0],["Add Ice To Water Jug","6:30 AM",0],["Make Protein Shake","6:30 AM",0],
+      ["Gym","6:45 AM",0],["Turn On Air Humidifier","10:00 AM",0],["Make Breakfast","10:05 AM",0],
+      ["Yard Maintenance","10:35 AM",0],["Shower","11:35 AM",0],["Feed Toby","12:00 PM",0],
+      ["Feed Luna","12:05 PM",0],["Prepare Pre-Workout","12:10 PM",0],["Prepare Tomorrow's Clothes","12:15 PM",0],
+      ["Empty Bedroom Trash If Needed","12:15 PM",0],["Meditate","12:20 PM",0],["Turn Off Air Humidifier","1:00 PM",0],
+      ["Make Dinner","6:15 PM",0],["Make Dessert","6:45 PM",0],["Complete Daily Hydration","7:00 PM",0],
+      ["Prepare Tomorrow's Hydration","7:10 PM",0],["Turn On Front & Back Yard Light","7:25 PM",0],
+      ["Walk Toby","7:25 PM",0],["Take Evening Supplements","9:00 PM",0],["Held The Line","9:30 PM",0],
+      ["Prepare Volcano For Tomorrow","10:00 PM",0]
+    ];
+    const WED = [
+      ["Wake Up","6:00 AM",0],["Turn Off Front & Back Yard Light","6:10 AM",0],["Walk Toby","6:10 AM",0],
+      ["Organize Quarters","6:25 AM",0],["Add Ice To Water Jug","6:30 AM",0],["Make Protein Shake","6:30 AM",0],
+      ["Donate Plasma","7:00 AM",1],["Vehicle Maintenance","10:00 AM",0],["Turn On Air Humidifier","10:20 AM",0],
+      ["Make Breakfast","10:25 AM",0],["Yard Maintenance","10:55 AM",0],["Shower","11:55 AM",0],
+      ["Feed Toby","12:20 PM",0],["Feed Luna","12:25 PM",0],["Prepare Pre-Workout","12:30 PM",0],
+      ["Prepare Tomorrow's Clothes","12:35 PM",0],["Empty Bedroom Trash If Needed","12:35 PM",0],
+      ["Meditate","12:40 PM",0],["Turn Off Air Humidifier","1:20 PM",0],["Make Dinner","6:15 PM",0],
+      ["Make Dessert","6:45 PM",0],["Complete Daily Hydration","7:00 PM",0],["Prepare Tomorrow's Hydration","7:10 PM",0],
+      ["Turn On Front & Back Yard Light","7:25 PM",0],["Walk Toby","7:25 PM",0],["Take Evening Supplements","9:00 PM",0],
+      ["Held The Line","9:30 PM",0]
+    ];
+    TUE.forEach((r, i) => ins2.run("TUE", r[0], r[1], r[2], i + 1));
+    WED.forEach((r, i) => ins2.run("WED", r[0], r[1], r[2], i + 1));
+    console.log("No Route routines seeded");
+  }
 }
 initProtocol();
 
@@ -221,18 +258,32 @@ function protocolActiveDayType() {
   return null;
 }
 
+// Returns 'TUE'|'WED' if the No Route Protocol is active for today (today is Tue/Wed), else null.
+function noRouteActiveDayType() {
+  const today = db.prepare("SELECT date('now','localtime') AS d").get().d;
+  const st = db.prepare("SELECT noroute_date FROM protocol_state WHERE id = 1").get();
+  if (!st || !st.noroute_date) return null;
+  if (st.noroute_date !== today) return null;
+  const wd = db.prepare("SELECT CAST(strftime('%w', ?) AS INTEGER) AS w").get(today).w;
+  if (wd === 2) return "TUE";
+  if (wd === 3) return "WED";
+  return null;
+}
+
 function generateDailyQuests() {
   const today = db.prepare("SELECT date('now', 'localtime') as today").get().today;
   db.prepare("DELETE FROM quests WHERE type = 'daily' AND created_date < ?").run(today);
   const existing = db.prepare("SELECT COUNT(*) as count FROM quests WHERE created_date = ? AND type = 'daily'").get(today);
   if (existing.count === 0) {
     const protoDay = protocolActiveDayType();
-    if (protoDay) {
-      // Going-Out Protocol active: daily quests come from the temp routine (non-required rows)
-      const protoRows = db.prepare("SELECT * FROM protocol_routines WHERE day_type = ? AND required = 0 ORDER BY sort_order").all(protoDay);
+    const nrDay = noRouteActiveDayType();
+    const activeSwap = protoDay || nrDay;
+    if (activeSwap) {
+      // A protocol is active: daily quests come from its temp routine (non-required rows).
+      const protoRows = db.prepare("SELECT * FROM protocol_routines WHERE day_type = ? AND required = 0 ORDER BY sort_order").all(activeSwap);
       const pins = db.prepare("INSERT INTO quests (title, type, category, xp_reward, created_date, optional, important) VALUES (?, 'daily', 'STR', 0, ?, 0, 0)");
       protoRows.forEach(r => pins.run(r.title + " @ " + r.time, today));
-      console.log("Protocol daily quests generated (" + protoDay + ") for " + today);
+      console.log("Protocol daily quests generated (" + activeSwap + ") for " + today);
       return;
     }
     const dayResult = db.prepare("SELECT CAST(strftime('%w', ?) AS INTEGER) as dayOfWeek").get(today);
@@ -261,7 +312,7 @@ function generateDailyQuests() {
 function generateWeeklyQuests() {
   const today = db.prepare("SELECT date('now', 'localtime') as today").get().today;
   const todayWeekday = db.prepare("SELECT CAST(strftime('%w', 'now', 'localtime') AS INTEGER) as dayOfWeek").get().dayOfWeek;
-  const protoDay = protocolActiveDayType();
+  const protoDay = protocolActiveDayType() || noRouteActiveDayType();
   if (protoDay) {
     // Protocol active: required quests for today come from the temp routine, replacing
     // the normal weekly quests for this weekday. Clear only the NORMAL weeklies for today
@@ -445,8 +496,9 @@ app.get("/api/player", (req, res) => {
 });
 
 app.get("/api/quests", (req, res) => {
-  // Auto-disarm: clear protocol once its armed date is in the past.
+  // Auto-disarm: clear protocols once their date is in the past.
   db.prepare("UPDATE protocol_state SET armed_date = NULL WHERE armed_date IS NOT NULL AND armed_date < date('now','localtime')").run();
+  db.prepare("UPDATE protocol_state SET noroute_date = NULL WHERE noroute_date IS NOT NULL AND noroute_date < date('now','localtime')").run();
   generateDailyQuests();
   generateWeeklyQuests();
   const today = db.prepare("SELECT date('now', 'localtime') as today").get().today;
@@ -456,7 +508,8 @@ app.get("/api/quests", (req, res) => {
   // Protocol state for the main Tasks screen: activeToday = recovery routine is live now;
   // armedDay = armed for an upcoming day (banner). Both derived from armed_date.
   const protoToday = protocolActiveDayType(); // 'SAT'|'SUN'|null when armed_date == today
-  const protoState = db.prepare("SELECT armed_date FROM protocol_state WHERE id = 1").get();
+  const noRouteToday = noRouteActiveDayType(); // 'TUE'|'WED'|null when noroute_date == today
+  const protoState = db.prepare("SELECT armed_date, noroute_date FROM protocol_state WHERE id = 1").get();
   let armedDay = null;
   if (protoState && protoState.armed_date) {
     const awd = db.prepare("SELECT CAST(strftime('%w', ?) AS INTEGER) AS w").get(protoState.armed_date).w;
@@ -472,7 +525,8 @@ app.get("/api/quests", (req, res) => {
     protocol: {
       activeToday: protoToday,                       // 'SAT'|'SUN'|null — recovery routine live today
       armedDay: armedDay,                            // 'SAT'|'SUN'|null — armed target
-      armedDate: protoState ? protoState.armed_date : null
+      armedDate: protoState ? protoState.armed_date : null,
+      noRouteActive: noRouteToday !== null           // true when No Route routine is live today
     }
   });
 });
@@ -482,7 +536,7 @@ app.get("/api/quests", (req, res) => {
 app.get("/api/protocol", (req, res) => {
   const today = db.prepare("SELECT date('now','localtime') AS d").get().d;
   const todayWd = db.prepare("SELECT CAST(strftime('%w', ?) AS INTEGER) AS w").get(today).w;
-  const st = db.prepare("SELECT armed_date FROM protocol_state WHERE id = 1").get();
+  const st = db.prepare("SELECT armed_date, noroute_date FROM protocol_state WHERE id = 1").get();
   // Arming is only allowed Fri (5) or Sat (6) night, targeting tomorrow (Sat or Sun).
   let armable = null;
   if (todayWd === 5) armable = "SAT";
@@ -493,7 +547,11 @@ app.get("/api/protocol", (req, res) => {
     const awd = db.prepare("SELECT CAST(strftime('%w', ?) AS INTEGER) AS w").get(st.armed_date).w;
     armedDay = awd === 6 ? "SAT" : (awd === 0 ? "SUN" : null);
   }
-  res.json({ armedDate: st ? st.armed_date : null, armedDay, armable, today });
+  res.json({
+    armedDate: st ? st.armed_date : null, armedDay, armable, today,
+    noRouteActive: (st && st.noroute_date === today && (todayWd === 2 || todayWd === 3)),
+    noRouteActivatable: (todayWd === 2 || todayWd === 3)
+  });
 });
 
 // POST arm: arms the protocol for tomorrow. Only valid Fri->Sat or Sat->Sun.
@@ -514,6 +572,61 @@ app.post("/api/protocol/disarm", (req, res) => {
   db.prepare("UPDATE protocol_state SET armed_date = NULL WHERE id = 1").run();
   res.json({ success: true });
 });
+
+// ─── No Route Protocol API (Tue/Wed, same-day, direct activation) ───────────────
+// Parse a "h:mm AM/PM" string to minutes-since-midnight for the auto-complete cutoff.
+function timeToMinutes(t) {
+  const m = /^(\d{1,2}):(\d{2})\s*(AM|PM)$/i.exec(t.trim());
+  if (!m) return null;
+  let h = parseInt(m[1], 10);
+  const min = parseInt(m[2], 10);
+  const pm = /PM/i.test(m[3]);
+  if (h === 12) h = 0;
+  if (pm) h += 12;
+  return h * 60 + min;
+}
+
+// POST activate: turns on No Route for today (Tue/Wed only), regenerates today's quests
+// from the No Route routine, and auto-marks all tasks before 10:00 AM as completed.
+app.post("/api/protocol/noroute/activate", (req, res) => {
+  const today = db.prepare("SELECT date('now','localtime') AS d").get().d;
+  const wd = db.prepare("SELECT CAST(strftime('%w', ?) AS INTEGER) AS w").get(today).w;
+  if (wd !== 2 && wd !== 3) {
+    return res.status(400).json({ error: "No Route can only be activated on Tuesday or Wednesday." });
+  }
+  db.prepare("UPDATE protocol_state SET noroute_date = ? WHERE id = 1").run(today);
+  // Regenerate today's quests so the No Route routine takes effect immediately.
+  db.prepare("DELETE FROM quests WHERE type = 'daily' AND created_date = ?").run(today);
+  db.prepare("DELETE FROM weekly_quests WHERE weekday = ? AND template_id != ?").run(wd, PROTOCOL_SENTINEL_ID());
+  generateDailyQuests();
+  generateWeeklyQuests();
+  // Auto-complete: mark tasks scheduled before 10:00 AM as done (titles are "Task @ h:mm AM/PM").
+  const CUTOFF = 10 * 60; // 10:00 AM
+  const dayType = wd === 2 ? "TUE" : "WED";
+  const rows = db.prepare("SELECT title, time FROM protocol_routines WHERE day_type = ? ").all(dayType);
+  const early = rows.filter(r => { const m = timeToMinutes(r.time); return m !== null && m < CUTOFF; });
+  const markDaily = db.prepare("UPDATE quests SET completed = 1 WHERE title = ? AND created_date = ? AND type = 'daily'");
+  const markWeekly = db.prepare("UPDATE weekly_quests SET completed = 1 WHERE title = ? AND created_date = ? AND weekday = ?");
+  early.forEach(r => {
+    const qt = r.title + " @ " + r.time;
+    markDaily.run(qt, today);
+    markWeekly.run(qt, today, wd);
+  });
+  res.json({ success: true, dayType, autoCompleted: early.length });
+});
+
+app.post("/api/protocol/noroute/deactivate", (req, res) => {
+  const today = db.prepare("SELECT date('now','localtime') AS d").get().d;
+  const wd = db.prepare("SELECT CAST(strftime('%w', ?) AS INTEGER) AS w").get(today).w;
+  db.prepare("UPDATE protocol_state SET noroute_date = NULL WHERE id = 1").run();
+  // Regenerate today's normal Tue/Wed quests.
+  db.prepare("DELETE FROM quests WHERE type = 'daily' AND created_date = ?").run(today);
+  db.prepare("DELETE FROM weekly_quests WHERE weekday = ? AND template_id = ?").run(wd, PROTOCOL_SENTINEL_ID());
+  generateDailyQuests();
+  generateWeeklyQuests();
+  res.json({ success: true });
+});
+
 
 app.get("/api/weekly-quests/all", (req, res) => {
   generateWeeklyQuests();

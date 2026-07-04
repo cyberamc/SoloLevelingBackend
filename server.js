@@ -1287,8 +1287,12 @@ app.get("/bookkeeping", requireAuth, (req, res) => {
     if (!groupBills) return;
     const income = (groupName in speedxChecks) ? speedxChecks[groupName] : (GROUP_INCOME_LABELS[groupName] ?? null);
     const groupTotal = groupBills.filter(b => b.status !== 'ON HOLD').reduce((sum, b) => sum + b.amount, 0);
-    const remaining = (income !== null && groupName !== 'People' && groupName !== 'Subscriptions') ? income - groupTotal
-      : (groupName === 'Subscriptions' ? peopleFunding - groupTotal : null);
+    // Show the "remaining bills" line on the same cards as before (income cards + Subscriptions).
+    const showRemaining = (income !== null && groupName !== 'People' && groupName !== 'Subscriptions') || groupName === 'Subscriptions';
+    // Remaining bills = sum of bills not yet paid (excludes PAID/AUTOPAY and ON HOLD).
+    const remainingBills = groupBills
+      .filter(b => b.status !== 'PAID' && b.status !== 'AUTOPAY' && b.status !== 'ON HOLD')
+      .reduce((sum, b) => sum + b.amount, 0);
 
     html += `<div class="card">
       <div class="card-header">
@@ -1305,8 +1309,8 @@ app.get("/bookkeeping", requireAuth, (req, res) => {
       </div>`;
     });
 
-    if (remaining !== null) {
-      html += `<div class="remaining">Remaining after bills: $${remaining.toFixed(2)}</div>`;
+    if (showRemaining) {
+      html += `<div class="remaining">Remaining bills: $${remainingBills.toFixed(2)}</div>`;
     }
 
     html += `</div>`;

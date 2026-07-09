@@ -2120,7 +2120,6 @@ function mergedRow(item){
   c += '<td class="col-kind"><span class="badge '+kind+'">'+(kind==="daily"?"Daily":"Required")+'</span></td>';
   c += '<td><input type="text" class="f-title" value="'+esc(item.title)+'" oninput="setDirty(true)"></td>';
   c += '<td class="col-time"><input type="text" class="time f-time" value="'+esc(item.time)+'" oninput="setDirty(true)"></td>';
-  c += '<td class="c col-flag"><input type="checkbox" class="f-optional" '+(item.optional?"checked":"")+' onchange="setDirty(true)"></td>';
   // Important applies to daily only
   if(kind==="daily") c += '<td class="c col-flag"><input type="checkbox" class="f-important" '+(item.important?"checked":"")+' onchange="setDirty(true)"></td>';
   else c += '<td class="c col-flag flag-na">—</td>';
@@ -2139,7 +2138,6 @@ function protoRow(item){
   let c = '<td class="drag-cell"><span class="drag" draggable="true">⋮⋮</span></td>';
   c += '<td><input type="text" class="f-title" value="'+esc(item.title)+'" oninput="setDirty(true)"></td>';
   c += '<td class="col-time"><input type="text" class="time f-time" value="'+esc(item.time)+'" oninput="setDirty(true)"></td>';
-  c += '<td class="c col-flag"><input type="checkbox" class="f-optional" '+(item.optional?"checked":"")+' onchange="setDirty(true)"></td>';
   c += '<td class="c col-flag"><input type="checkbox" class="f-required" '+(item.required?"checked":"")+' onchange="setDirty(true)"></td>';
   c += '<td class="c col-del"><button class="del" onclick="this.closest(\\'tr\\').remove(); setDirty(true); refreshCounts();" title="Delete">&times;</button></td>';
   const tr = document.createElement('tr');
@@ -2166,9 +2164,8 @@ function addProto(){
 
 function refreshCounts(){
   const rows = document.querySelectorAll('#tbl tbody tr:not(.empty-row)');
-  let optional=0; rows.forEach(r=>{ const o=r.querySelector('.f-optional'); if(o&&o.checked) optional++; });
   const el = document.getElementById('count');
-  if(el) el.textContent = rows.length+' quest'+(rows.length===1?'':'s')+(optional?(' · '+optional+' optional'):'')+' · time-sorted';
+  if(el) el.textContent = rows.length+' quest'+(rows.length===1?'':'s')+' · time-sorted';
 }
 
 // Drag reorder (visual; save re-sorts by time regardless)
@@ -2201,18 +2198,18 @@ async function load(){
     if(isProto()){
       note.textContent = 'Protocol routine for '+current+'. Rows re-order by time on save. Changes apply the next time this protocol runs.';
       let h = '<div class="section-head"><h2>Protocol routine</h2><span class="count" id="count"></span></div>';
-      h += '<table id="tbl"><thead><tr><th class="col-drag"></th><th>Title</th><th class="col-time">Time</th><th class="c col-flag">Optional</th><th class="c col-flag">Required</th><th class="col-del"></th></tr></thead><tbody></tbody></table>';
+      h += '<table id="tbl"><thead><tr><th class="col-drag"></th><th>Title</th><th class="col-time">Time</th><th class="c col-flag">Required</th><th class="col-del"></th></tr></thead><tbody></tbody></table>';
       h += '<div class="adds"><button class="add" onclick="addProto()">+ Add quest</button></div>';
       document.getElementById("content").innerHTML = h;
       const tbody = document.querySelector('#tbl tbody');
       const items = (data.protocol||[]).slice().sort((a,b)=>tmin(a.time)-tmin(b.time));
-      if(items.length===0){ tbody.innerHTML='<tr class="empty-row"><td colspan="6" class="empty">No quests. Add one below.</td></tr>'; }
+      if(items.length===0){ tbody.innerHTML='<tr class="empty-row"><td colspan="5" class="empty">No quests. Add one below.</td></tr>'; }
       else items.forEach(it=> tbody.appendChild(protoRow(it)));
     } else {
       const dayName = WEEKDAYS.find(w=>w[0]===current)[1];
       note.textContent = 'Editing '+dayName+'. Daily and required quests shown together, sorted by time. Changes apply the next time this day occurs — today\\'s quests are already generated.';
       let h = '<div class="section-head"><h2>Quests</h2><span class="count" id="count"></span></div>';
-      h += '<table id="tbl"><thead><tr><th class="col-drag"></th><th class="col-kind">Type</th><th>Title</th><th class="col-time">Time</th><th class="c col-flag">Optional</th><th class="c col-flag">Important</th><th class="c col-flag">Monthly</th><th class="col-del"></th></tr></thead><tbody></tbody></table>';
+      h += '<table id="tbl"><thead><tr><th class="col-drag"></th><th class="col-kind">Type</th><th>Title</th><th class="col-time">Time</th><th class="c col-flag">Important</th><th class="c col-flag">Monthly</th><th class="col-del"></th></tr></thead><tbody></tbody></table>';
       h += '<div class="adds"><button class="add" onclick="addMerged(\\'daily\\')">+ Daily quest</button><button class="add req" onclick="addMerged(\\'required\\')">+ Required quest</button></div>';
       document.getElementById("content").innerHTML = h;
       const tbody = document.querySelector('#tbl tbody');
@@ -2220,7 +2217,7 @@ async function load(){
         .concat((data.daily||[]).map(x=>Object.assign({_kind:"daily"},x)))
         .concat((data.required||[]).map(x=>Object.assign({_kind:"required"},x)))
         .sort((a,b)=>tmin(a.time)-tmin(b.time));
-      if(merged.length===0){ tbody.innerHTML='<tr class="empty-row"><td colspan="8" class="empty">No quests. Add one below.</td></tr>'; }
+      if(merged.length===0){ tbody.innerHTML='<tr class="empty-row"><td colspan="7" class="empty">No quests. Add one below.</td></tr>'; }
       else merged.forEach(it=> tbody.appendChild(mergedRow(it)));
     }
     attachAllDrag();
@@ -2237,7 +2234,7 @@ async function save(){
     rows.forEach(r=>protocol.push({
       title: r.querySelector('.f-title').value,
       time: r.querySelector('.f-time').value,
-      optional: r.querySelector('.f-optional').checked?1:0,
+      optional: 0,
       required: r.querySelector('.f-required').checked?1:0
     }));
     body = { protocol };
@@ -2246,7 +2243,7 @@ async function save(){
     const daily=[], required=[];
     rows.forEach(r=>{
       const kind=r.dataset.kind;
-      const base={ title:r.querySelector('.f-title').value, time:r.querySelector('.f-time').value, optional:r.querySelector('.f-optional').checked?1:0 };
+      const base={ title:r.querySelector('.f-title').value, time:r.querySelector('.f-time').value, optional:0 };
       if(kind==="daily"){ base.important = r.querySelector('.f-important').checked?1:0; daily.push(base); }
       else { base.monthly = r.querySelector('.f-monthly').checked?1:0; required.push(base); }
     });

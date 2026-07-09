@@ -1829,6 +1829,428 @@ app.delete("/api/delivery-weeks/:id", (req, res) => {
   res.json({ success: true });
 });
 
+// ─── Routine Editor (browser-based template editing) ──────────────────────────
+// GET  /api/routine-editor/:tab   — load a tab's editable rows
+// POST /api/routine-editor/:tab   — save a tab (delete-all + re-insert, time-sorted)
+// Tabs: weekday "0".."6" (Sun..Sat) OR protocol "SAT"/"SUN"/"TUE"/"WED".
+// Weekday tabs edit daily_quest_templates + weekly_quest_templates.
+// Protocol tabs edit protocol_routines (sort_order recomputed from time order).
+// XP/gold left at existing defaults, never surfaced. Sentinel row always hidden.
+
+// Parse "6 AM" / "9:15 AM" / "5:00 PM" -> minutes since midnight (null if unparseable).
+function reTimeToMinutes(s) {
+  if (!s) return null;
+  const m = String(s).trim().match(/^(\d{1,2})(?::(\d{2}))?\s*(AM|PM)$/i);
+  if (!m) return null;
+  let h = parseInt(m[1], 10);
+  const min = m[2] ? parseInt(m[2], 10) : 0;
+  if (h < 1 || h > 12 || min > 59) return null;
+  const ap = m[3].toUpperCase();
+  if (ap === "PM" && h !== 12) h += 12;
+  if (ap === "AM" && h === 12) h = 0;
+  return h * 60 + min;
+}
+// Normalize a time string to canonical "H:MM AM/PM" (e.g. "5 pm" -> "5:00 PM").
+function reNormalizeTime(s) {
+  const mins = reTimeToMinutes(s);
+  if (mins === null) return null;
+  let h = Math.floor(mins / 60);
+  const min = mins % 60;
+  const ap = h >= 12 ? "PM" : "AM";
+  let h12 = h % 12; if (h12 === 0) h12 = 12;
+  return h12 + ":" + String(min).padStart(2, "0") + " " + ap;
+}
+const RE_PROTOCOL_TABS = ["SAT", "SUN", "TUE", "WED"];
+
+app.get("/api/routine-editor/:tab", requireAuth, (req, res) => {
+  const tab = req.params.tab;
+
+  // Protocol tab
+  if (RE_PROTOCOL_TABS.includes(tab)) {
+    const rows = db.prepare(
+      "SELECT id, title, time, optional, required FROM protocol_routines WHERE day_type = ? ORDER BY sort_order"
+    ).all(tab);
+    const sorted = rows.slice().sort((a, b) => {
+      const am = reTimeToMinutes(a.time), bm = reTimeToMinutes(b.time);
+      return (am === null ? 99999 : am) - (bm === null ? 99999 : bm);
+    });
+    return res.json({
+      tab, kind: "protocol",
+      protocol: sorted.map(r => ({
+        title: r.title, time: r.time,
+        optional: r.optional ? 1 : 0, required: r.required ? 1 : 0
+      }))
+    });
+  }
+
+  // Weekday tab (0..6)
+  const wd = parseInt(tab, 10);
+  if (isNaN(wd) || wd < 0 || wd > 6) {
+    return res.status(400).json({ error: "tab must be 0-6 or SAT/SUN/TUE/WED" });
+  }
+
+  let dailyRows;
+  if (wd === 2 || wd === 3) {
+    const col = wd === 2 ? "tuesday_time" : "wednesday_time";
+    dailyRows = db.prepare(
+      `SELECT id, title, ${col} AS t, optional, important FROM daily_quest_templates WHERE ${col} IS NOT NULL AND time IS NULL`
+    ).all();
+  } else {
+    dailyRows = db.prepare(
+      "SELECT id, title, time AS t, optional, important FROM daily_quest_templates WHERE time IS NOT NULL AND tuesday_time IS NULL AND wednesday_time IS NULL AND weekday = ?"
+    ).all(wd);
+  }
+  const sortByTime = (rows) => rows.slice().sort((a, b) => {
+    const am = reTimeToMinutes(a.t), bm = reTimeToMinutes(b.t);
+    return (am === null ? 99999 : am) - (bm === null ? 99999 : bm);
+  });
+  const daily = sortByTime(dailyRows).map(r => ({
+    title: r.title, time: r.t,
+    optional: r.optional ? 1 : 0, important: r.important ? 1 : 0
+  }));
+
+  const weeklyRows = db.prepare(
+    "SELECT id, title, time AS t, optional, monthly FROM weekly_quest_templates WHERE weekday = ? AND title != '__PROTOCOL_SENTINEL__'"
+  ).all(wd);
+  const required = sortByTime(weeklyRows).map(r => ({
+    title: r.title, time: r.t,
+    optional: r.optional ? 1 : 0, monthly: r.monthly ? 1 : 0
+  }));
+
+  res.json({ tab, kind: "weekday", weekday: wd, daily, required });
+});
+
+app.post("/api/routine-editor/:tab", requireAuth, (req, res) => {
+  const tab = req.params.tab;
+
+  // ── Protocol save ──
+  if (RE_PROTOCOL_TABS.includes(tab)) {
+    const items = Array.isArray(req.body.protocol) ? req.body.protocol : null;
+    if (!items) return res.status(400).json({ error: "protocol array required" });
+    // Validate
+    for (const it of items) {
+      if (!it.title || !String(it.title).trim()) return res.status(400).json({ error: "Every quest needs a title." });
+      if (reNormalizeTime(it.time) === null) return res.status(400).json({ error: `Invalid time "${it.time}" for "${it.title}". Use e.g. 5:00 PM.` });
+    }
+    const clean = items.map(it => ({
+      title: String(it.title).trim(),
+      time: reNormalizeTime(it.time),
+      optional: it.optional ? 1 : 0,
+      required: it.required ? 1 : 0
+    })).sort((a, b) => reTimeToMinutes(a.time) - reTimeToMinutes(b.time));
+
+    const tx = db.transaction(() => {
+      db.prepare("DELETE FROM protocol_routines WHERE day_type = ?").run(tab);
+      const ins = db.prepare(
+        "INSERT INTO protocol_routines (day_type, title, time, optional, required, sort_order) VALUES (?, ?, ?, ?, ?, ?)"
+      );
+      clean.forEach((it, i) => ins.run(tab, it.title, it.time, it.optional, it.required, i + 1));
+    });
+    tx();
+    return res.json({ success: true, tab, count: clean.length });
+  }
+
+  // ── Weekday save ──
+  const wd = parseInt(tab, 10);
+  if (isNaN(wd) || wd < 0 || wd > 6) {
+    return res.status(400).json({ error: "tab must be 0-6 or SAT/SUN/TUE/WED" });
+  }
+  const daily = Array.isArray(req.body.daily) ? req.body.daily : null;
+  const required = Array.isArray(req.body.required) ? req.body.required : null;
+  if (!daily || !required) return res.status(400).json({ error: "daily and required arrays required" });
+
+  // Validate both sections
+  for (const it of [...daily, ...required]) {
+    if (!it.title || !String(it.title).trim()) return res.status(400).json({ error: "Every quest needs a title." });
+    if (reNormalizeTime(it.time) === null) return res.status(400).json({ error: `Invalid time "${it.time}" for "${it.title}". Use e.g. 5:00 PM.` });
+  }
+  const cleanDaily = daily.map(it => ({
+    title: String(it.title).trim(), time: reNormalizeTime(it.time),
+    optional: it.optional ? 1 : 0, important: it.important ? 1 : 0
+  })).sort((a, b) => reTimeToMinutes(a.time) - reTimeToMinutes(b.time));
+  const cleanReq = required.map(it => ({
+    title: String(it.title).trim(), time: reNormalizeTime(it.time),
+    optional: it.optional ? 1 : 0, monthly: it.monthly ? 1 : 0
+  })).sort((a, b) => reTimeToMinutes(a.time) - reTimeToMinutes(b.time));
+
+  const tx = db.transaction(() => {
+    // Daily: delete only THIS day's rows, re-insert
+    if (wd === 2 || wd === 3) {
+      const col = wd === 2 ? "tuesday_time" : "wednesday_time";
+      db.prepare(`DELETE FROM daily_quest_templates WHERE ${col} IS NOT NULL AND time IS NULL`).run();
+      const ins = db.prepare(
+        `INSERT INTO daily_quest_templates (title, time, category, xp_reward, gold_reward, ${col}, optional, weekday, important) VALUES (?, NULL, 'STR', 10, 5, ?, ?, NULL, ?)`
+      );
+      cleanDaily.forEach(it => ins.run(it.title, it.time, it.optional, it.important));
+    } else {
+      db.prepare(
+        "DELETE FROM daily_quest_templates WHERE time IS NOT NULL AND tuesday_time IS NULL AND wednesday_time IS NULL AND weekday = ?"
+      ).run(wd);
+      const ins = db.prepare(
+        "INSERT INTO daily_quest_templates (title, time, category, xp_reward, gold_reward, tuesday_time, wednesday_time, optional, weekday, important) VALUES (?, ?, 'STR', 10, 5, NULL, NULL, ?, ?, ?)"
+      );
+      cleanDaily.forEach(it => ins.run(it.title, it.time, it.optional, wd, it.important));
+    }
+    // Required (weekly): delete this weekday's non-sentinel rows, re-insert
+    db.prepare(
+      "DELETE FROM weekly_quest_templates WHERE weekday = ? AND title != '__PROTOCOL_SENTINEL__'"
+    ).run(wd);
+    const insW = db.prepare(
+      "INSERT INTO weekly_quest_templates (title, weekday, category, xp_reward, gold_reward, optional, time, monthly) VALUES (?, ?, 'STR', 10, 5, ?, ?, ?)"
+    );
+    cleanReq.forEach(it => insW.run(it.title, wd, it.optional, it.time, it.monthly));
+  });
+  tx();
+  res.json({ success: true, tab, dailyCount: cleanDaily.length, requiredCount: cleanReq.length });
+});
+
+app.get("/routines", requireAuth, (req, res) => {
+  const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Routine Editor</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #0a0a1a; color: #ddd; font-family: -apple-system, sans-serif; padding: 16px; max-width: 900px; margin: 0 auto; }
+  h1 { color: #fff; font-size: 24px; margin-bottom: 4px; }
+  .subtitle { color: #888; font-size: 13px; margin-bottom: 16px; }
+  .subtitle a { color: #7b8cde; text-decoration: none; }
+  .tabs { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
+  .tabs.proto { margin-bottom: 16px; }
+  .proto-label { color: #666; font-size: 12px; align-self: center; margin-right: 4px; }
+  .tab { background: #12122a; border: 1px solid #2a2a3a; color: #bbb; padding: 7px 13px; border-radius: 8px; cursor: pointer; font-size: 14px; }
+  .tab:hover { background: #1a1a30; }
+  .tab.active { background: #7b8cde; border-color: #7b8cde; color: #fff; font-weight: bold; }
+  .note { background: #1a1a2e; border: 1px solid #2a2a3a; border-left: 3px solid #7b8cde; border-radius: 6px; padding: 8px 12px; font-size: 12px; color: #99a; margin-bottom: 18px; }
+  .section-head { display: flex; justify-content: space-between; align-items: baseline; margin: 18px 0 8px; }
+  .section-head h2 { color: #fff; font-size: 17px; }
+  .section-head .count { color: #888; font-size: 13px; }
+  table { width: 100%; border-collapse: collapse; background: #12122a; border: 1px solid #2a2a3a; border-radius: 8px; overflow: hidden; }
+  th { text-align: left; font-size: 11px; color: #777; font-weight: normal; padding: 8px 10px; border-bottom: 1px solid #2a2a3a; }
+  th.c, td.c { text-align: center; }
+  td { padding: 6px 10px; border-bottom: 1px solid #1e1e30; vertical-align: middle; }
+  tr:last-child td { border-bottom: none; }
+  input[type=text] { width: 100%; background: #0e0e1e; border: 1px solid #2a2a3a; border-radius: 6px; color: #fff; font-size: 14px; padding: 7px 9px; font-family: inherit; }
+  input.time { width: 96px; }
+  input[type=checkbox] { width: 17px; height: 17px; accent-color: #7b8cde; cursor: pointer; }
+  .del { background: none; border: none; color: #a55; font-size: 17px; cursor: pointer; line-height: 1; padding: 2px 6px; }
+  .del:hover { color: #e77; }
+  .add { background: #12122a; border: 1px dashed #3a3a4a; color: #9ab; padding: 7px 14px; border-radius: 8px; cursor: pointer; font-size: 13px; margin-top: 8px; }
+  .add:hover { background: #1a1a30; }
+  .bar { display: flex; align-items: center; gap: 12px; margin-top: 22px; position: sticky; bottom: 0; background: #0a0a1a; padding: 12px 0; }
+  .save { background: #1a2a1a; border: 1px solid #2a3a2a; color: #4CAF50; padding: 10px 26px; border-radius: 8px; cursor: pointer; font-size: 15px; font-weight: bold; }
+  .save:hover { background: #24382a; }
+  .save:disabled { opacity: .5; cursor: default; }
+  .status { font-size: 13px; color: #888; }
+  .drag { color: #555; cursor: grab; font-size: 15px; padding: 0 2px; user-select: none; }
+  tr.dragging { opacity: .4; }
+  .col-drag { width: 20px; }
+  .col-time { width: 108px; }
+  .col-flag { width: 68px; }
+  .col-del { width: 34px; }
+  .empty { color: #666; font-size: 13px; padding: 10px; }
+  .toast { position: fixed; bottom: 20px; right: 20px; padding: 11px 20px; border-radius: 8px; font-size: 14px; display: none; z-index: 999; }
+  .toast.ok { background: #1e3a1e; color: #7CFC7C; border: 1px solid #2a4a2a; }
+  .toast.err { background: #3a1e1e; color: #FF9999; border: 1px solid #4a2a2a; }
+</style>
+</head>
+<body>
+<h1>Routine Editor</h1>
+<div class="subtitle">Edit quest templates · <a href="/logout">Log out</a></div>
+
+<div class="tabs" id="weekday-tabs"></div>
+<div class="tabs proto" id="proto-tabs"><span class="proto-label">Protocols:</span></div>
+
+<div class="note" id="note"></div>
+<div id="content"></div>
+
+<div class="bar">
+  <button class="save" id="saveBtn" onclick="save()">Save changes</button>
+  <span class="status" id="status"></span>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+const WEEKDAYS = [["0","Sun"],["1","Mon"],["2","Tue"],["3","Wed"],["4","Thu"],["5","Fri"],["6","Sat"]];
+const PROTOS = ["SAT","SUN","TUE","WED"];
+let current = "0";
+let dirty = false;
+
+function esc(s){ return String(s==null?"":s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;"); }
+function toast(msg, ok){ const t=document.getElementById("toast"); t.textContent=msg; t.className="toast "+(ok?"ok":"err"); t.style.display="block"; setTimeout(()=>{t.style.display="none";},2600); }
+function setDirty(d){ dirty=d; document.getElementById("status").textContent = d ? "Unsaved changes" : ""; }
+
+function buildTabs(){
+  const wt=document.getElementById("weekday-tabs");
+  WEEKDAYS.forEach(([v,label])=>{
+    const b=document.createElement("button"); b.className="tab"; b.textContent=label; b.dataset.tab=v;
+    b.onclick=()=>selectTab(v); wt.appendChild(b);
+  });
+  const pt=document.getElementById("proto-tabs");
+  PROTOS.forEach(v=>{
+    const b=document.createElement("button"); b.className="tab"; b.textContent=v; b.dataset.tab=v;
+    b.onclick=()=>selectTab(v); pt.appendChild(b);
+  });
+}
+function highlightTab(){
+  document.querySelectorAll(".tab").forEach(b=>b.classList.toggle("active", b.dataset.tab===current));
+}
+function selectTab(tab){
+  if(dirty && !confirm("You have unsaved changes. Switch tabs and lose them?")) return;
+  current=tab; highlightTab(); load();
+}
+
+const isProto = () => PROTOS.includes(current);
+
+function rowHtml(item, flags){
+  // flags: array of {key,label}
+  let cells = '<td class="drag-cell"><span class="drag" draggable="true">⋮⋮</span></td>';
+  cells += '<td><input type="text" class="f-title" value="'+esc(item.title)+'" oninput="setDirty(true)"></td>';
+  cells += '<td class="col-time"><input type="text" class="time f-time" value="'+esc(item.time)+'" oninput="setDirty(true)"></td>';
+  flags.forEach(f=>{
+    cells += '<td class="c col-flag"><input type="checkbox" class="f-'+f.key+'" '+(item[f.key]?"checked":"")+' onchange="setDirty(true)"></td>';
+  });
+  cells += '<td class="c col-del"><button class="del" onclick="this.closest(\\'tr\\').remove(); setDirty(true); refreshCounts();" title="Delete">&times;</button></td>';
+  return '<tr>'+cells+'</tr>';
+}
+
+function tableHtml(id, title, items, flags){
+  let h = '<div class="section-head"><h2>'+title+'</h2><span class="count" id="'+id+'-count"></span></div>';
+  h += '<table id="'+id+'"><thead><tr>';
+  h += '<th class="col-drag"></th><th>Title</th><th class="col-time">Time</th>';
+  flags.forEach(f=> h += '<th class="c col-flag">'+f.label+'</th>');
+  h += '<th class="col-del"></th></tr></thead><tbody>';
+  if(items.length===0){ h += '<tr class="empty-row"><td colspan="'+(4+flags.length)+'" class="empty">No quests. Add one below.</td></tr>'; }
+  else { items.forEach(it=> h += rowHtml(it, flags)); }
+  h += '</tbody></table>';
+  h += '<button class="add" onclick="addRow(\\''+id+'\\')">+ Add quest</button>';
+  return h;
+}
+
+let currentFlags = {}; // id -> flags array
+
+function addRow(tableId){
+  const tbody = document.querySelector('#'+tableId+' tbody');
+  const emptyRow = tbody.querySelector('.empty-row'); if(emptyRow) emptyRow.remove();
+  const flags = currentFlags[tableId];
+  const tmp = document.createElement('tbody');
+  tmp.innerHTML = rowHtml({title:"",time:"",optional:0}, flags);
+  const tr = tmp.firstElementChild;
+  tbody.appendChild(tr);
+  attachDrag(tr);
+  setDirty(true); refreshCounts();
+  tr.querySelector('.f-title').focus();
+}
+
+function refreshCounts(){
+  document.querySelectorAll('table').forEach(tbl=>{
+    const countEl = document.getElementById(tbl.id+'-count');
+    if(!countEl) return;
+    const rows = tbl.querySelectorAll('tbody tr:not(.empty-row)');
+    let optional=0; rows.forEach(r=>{ const o=r.querySelector('.f-optional'); if(o&&o.checked) optional++; });
+    const total=rows.length;
+    countEl.textContent = total+' quest'+(total===1?'':'s')+(optional?(' · '+optional+' optional'):'')+' · time-sorted';
+  });
+}
+
+// Drag reorder (visual only; save re-sorts by time regardless)
+let dragEl=null;
+function attachDrag(tr){
+  const handle = tr.querySelector('.drag');
+  if(!handle) return;
+  handle.addEventListener('dragstart', e=>{ dragEl=tr; tr.classList.add('dragging'); e.dataTransfer.effectAllowed='move'; });
+  handle.addEventListener('dragend', ()=>{ if(dragEl)dragEl.classList.remove('dragging'); dragEl=null; });
+  tr.addEventListener('dragover', e=>{
+    e.preventDefault();
+    if(!dragEl || dragEl===tr || dragEl.parentNode!==tr.parentNode) return;
+    const rect=tr.getBoundingClientRect();
+    const after = (e.clientY - rect.top) > rect.height/2;
+    tr.parentNode.insertBefore(dragEl, after ? tr.nextSibling : tr);
+    setDirty(true);
+  });
+}
+function attachAllDrag(){ document.querySelectorAll('#content tbody tr:not(.empty-row)').forEach(attachDrag); }
+
+async function load(){
+  document.getElementById("content").innerHTML = '<div class="empty">Loading…</div>';
+  setDirty(false);
+  try{
+    const r = await fetch('/api/routine-editor/'+current);
+    if(!r.ok) throw new Error((await r.json()).error||'Load failed');
+    const data = await r.json();
+    const note = document.getElementById("note");
+    if(isProto()){
+      note.textContent = 'Protocol routine for '+current+'. Rows re-order by time on save. Changes apply the next time this protocol runs.';
+      currentFlags = { 'tbl-proto':[{key:'optional',label:'Optional'},{key:'required',label:'Required'}] };
+      document.getElementById("content").innerHTML =
+        tableHtml('tbl-proto','Protocol routine', data.protocol, currentFlags['tbl-proto']);
+    } else {
+      const dayName = WEEKDAYS.find(w=>w[0]===current)[1];
+      note.textContent = 'Editing '+dayName+'. Changes apply the next time this day occurs — today\\'s quests are already generated.';
+      currentFlags = {
+        'tbl-daily':[{key:'optional',label:'Optional'},{key:'important',label:'Important'}],
+        'tbl-required':[{key:'optional',label:'Optional'},{key:'monthly',label:'Monthly'}]
+      };
+      document.getElementById("content").innerHTML =
+        tableHtml('tbl-daily','Daily quests', data.daily, currentFlags['tbl-daily']) +
+        tableHtml('tbl-required','Required / weekly quests', data.required, currentFlags['tbl-required']);
+    }
+    attachAllDrag();
+    refreshCounts();
+  }catch(e){ document.getElementById("content").innerHTML='<div class="empty">Error: '+esc(e.message)+'</div>'; }
+}
+
+function readTable(tableId, flags){
+  const rows = document.querySelectorAll('#'+tableId+' tbody tr:not(.empty-row)');
+  const out=[];
+  rows.forEach(r=>{
+    const item = {
+      title: r.querySelector('.f-title').value,
+      time: r.querySelector('.f-time').value
+    };
+    flags.forEach(f=>{ item[f.key] = r.querySelector('.f-'+f.key).checked ? 1 : 0; });
+    out.push(item);
+  });
+  return out;
+}
+
+async function save(){
+  const btn=document.getElementById("saveBtn");
+  let body;
+  if(isProto()){
+    body = { protocol: readTable('tbl-proto', currentFlags['tbl-proto']) };
+  } else {
+    body = {
+      daily: readTable('tbl-daily', currentFlags['tbl-daily']),
+      required: readTable('tbl-required', currentFlags['tbl-required'])
+    };
+  }
+  btn.disabled=true; document.getElementById("status").textContent="Saving…";
+  try{
+    const r = await fetch('/api/routine-editor/'+current, {
+      method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)
+    });
+    const data = await r.json();
+    if(!r.ok) throw new Error(data.error||'Save failed');
+    setDirty(false);
+    toast('Saved '+(isProto()?current:WEEKDAYS.find(w=>w[0]===current)[1]), true);
+    load(); // reload to reflect canonical time-sort + normalized times
+  }catch(e){ document.getElementById("status").textContent=""; toast(e.message, false); }
+  finally{ btn.disabled=false; }
+}
+
+window.addEventListener('beforeunload', e=>{ if(dirty){ e.preventDefault(); e.returnValue=''; } });
+
+buildTabs(); highlightTab(); load();
+</script>
+</body>
+</html>`;
+  res.send(html);
+});
+
+
 // ─── Start ────────────────────────────────────────────────────────────────────
 app.listen(3743, "0.0.0.0", () => {
   console.log("Solo Leveling on 3743");

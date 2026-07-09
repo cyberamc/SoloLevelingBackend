@@ -1862,7 +1862,7 @@ function reNormalizeTime(s) {
 }
 const RE_PROTOCOL_TABS = ["SAT", "SUN", "TUE", "WED"];
 
-app.get("/api/routine-editor/:tab", requireAuth, (req, res) => {
+app.get("/api/routine-editor/:tab", (req, res) => {
   const tab = req.params.tab;
 
   // Protocol tab
@@ -1920,7 +1920,7 @@ app.get("/api/routine-editor/:tab", requireAuth, (req, res) => {
   res.json({ tab, kind: "weekday", weekday: wd, daily, required });
 });
 
-app.post("/api/routine-editor/:tab", requireAuth, (req, res) => {
+app.post("/api/routine-editor/:tab", (req, res) => {
   const tab = req.params.tab;
 
   // ── Protocol save ──
@@ -2035,10 +2035,16 @@ app.get("/routines", requireAuth, (req, res) => {
   input[type=text] { width: 100%; background: #0e0e1e; border: 1px solid #2a2a3a; border-radius: 6px; color: #fff; font-size: 14px; padding: 7px 9px; font-family: inherit; }
   input.time { width: 96px; }
   input[type=checkbox] { width: 17px; height: 17px; accent-color: #7b8cde; cursor: pointer; }
+  .badge { display: inline-block; font-size: 10px; font-weight: bold; padding: 3px 7px; border-radius: 5px; letter-spacing: .3px; white-space: nowrap; }
+  .badge.daily { background: #16233a; color: #7fb0ff; border: 1px solid #23405f; }
+  .badge.required { background: #2a1f36; color: #c79bff; border: 1px solid #43315c; }
   .del { background: none; border: none; color: #a55; font-size: 17px; cursor: pointer; line-height: 1; padding: 2px 6px; }
   .del:hover { color: #e77; }
-  .add { background: #12122a; border: 1px dashed #3a3a4a; color: #9ab; padding: 7px 14px; border-radius: 8px; cursor: pointer; font-size: 13px; margin-top: 8px; }
+  .adds { display: flex; gap: 8px; margin-top: 8px; }
+  .add { background: #12122a; border: 1px dashed #3a3a4a; color: #9ab; padding: 7px 14px; border-radius: 8px; cursor: pointer; font-size: 13px; }
   .add:hover { background: #1a1a30; }
+  .add.req { border-color: #43315c; color: #c79bff; }
+  .add.req:hover { background: #1c1630; }
   .bar { display: flex; align-items: center; gap: 12px; margin-top: 22px; position: sticky; bottom: 0; background: #0a0a1a; padding: 12px 0; }
   .save { background: #1a2a1a; border: 1px solid #2a3a2a; color: #4CAF50; padding: 10px 26px; border-radius: 8px; cursor: pointer; font-size: 15px; font-weight: bold; }
   .save:hover { background: #24382a; }
@@ -2047,9 +2053,11 @@ app.get("/routines", requireAuth, (req, res) => {
   .drag { color: #555; cursor: grab; font-size: 15px; padding: 0 2px; user-select: none; }
   tr.dragging { opacity: .4; }
   .col-drag { width: 20px; }
+  .col-kind { width: 78px; }
   .col-time { width: 108px; }
   .col-flag { width: 68px; }
   .col-del { width: 34px; }
+  .flag-na { color: #333; font-size: 12px; }
   .empty { color: #666; font-size: 13px; padding: 10px; }
   .toast { position: fixed; bottom: 20px; right: 20px; padding: 11px 20px; border-radius: 8px; font-size: 14px; display: none; z-index: 999; }
   .toast.ok { background: #1e3a1e; color: #7CFC7C; border: 1px solid #2a4a2a; }
@@ -2103,59 +2111,67 @@ function selectTab(tab){
 }
 
 const isProto = () => PROTOS.includes(current);
+const tmin = (s) => { if(!s) return 99999; const m=String(s).trim().match(/^(\\d{1,2})(?::(\\d{2}))?\\s*(AM|PM)$/i); if(!m) return 99999; let h=parseInt(m[1],10); const mn=m[2]?parseInt(m[2],10):0; const ap=m[3].toUpperCase(); if(ap==="PM"&&h!==12)h+=12; if(ap==="AM"&&h===12)h=0; return h*60+mn; };
 
-function rowHtml(item, flags){
-  // flags: array of {key,label}
-  let cells = '<td class="drag-cell"><span class="drag" draggable="true">⋮⋮</span></td>';
-  cells += '<td><input type="text" class="f-title" value="'+esc(item.title)+'" oninput="setDirty(true)"></td>';
-  cells += '<td class="col-time"><input type="text" class="time f-time" value="'+esc(item.time)+'" oninput="setDirty(true)"></td>';
-  flags.forEach(f=>{
-    cells += '<td class="c col-flag"><input type="checkbox" class="f-'+f.key+'" '+(item[f.key]?"checked":"")+' onchange="setDirty(true)"></td>';
-  });
-  cells += '<td class="c col-del"><button class="del" onclick="this.closest(\\'tr\\').remove(); setDirty(true); refreshCounts();" title="Delete">&times;</button></td>';
-  return '<tr>'+cells+'</tr>';
+// ── Merged weekday row (kind = 'daily' | 'required') ──
+function mergedRow(item){
+  const kind = item._kind;
+  let c = '<td class="drag-cell"><span class="drag" draggable="true">⋮⋮</span></td>';
+  c += '<td class="col-kind"><span class="badge '+kind+'">'+(kind==="daily"?"Daily":"Required")+'</span></td>';
+  c += '<td><input type="text" class="f-title" value="'+esc(item.title)+'" oninput="setDirty(true)"></td>';
+  c += '<td class="col-time"><input type="text" class="time f-time" value="'+esc(item.time)+'" oninput="setDirty(true)"></td>';
+  c += '<td class="c col-flag"><input type="checkbox" class="f-optional" '+(item.optional?"checked":"")+' onchange="setDirty(true)"></td>';
+  // Important applies to daily only
+  if(kind==="daily") c += '<td class="c col-flag"><input type="checkbox" class="f-important" '+(item.important?"checked":"")+' onchange="setDirty(true)"></td>';
+  else c += '<td class="c col-flag flag-na">—</td>';
+  // Monthly applies to required only
+  if(kind==="required") c += '<td class="c col-flag"><input type="checkbox" class="f-monthly" '+(item.monthly?"checked":"")+' onchange="setDirty(true)"></td>';
+  else c += '<td class="c col-flag flag-na">—</td>';
+  c += '<td class="c col-del"><button class="del" onclick="this.closest(\\'tr\\').remove(); setDirty(true); refreshCounts();" title="Delete">&times;</button></td>';
+  const tr = document.createElement('tr');
+  tr.dataset.kind = kind;
+  tr.innerHTML = c;
+  return tr;
 }
 
-function tableHtml(id, title, items, flags){
-  let h = '<div class="section-head"><h2>'+title+'</h2><span class="count" id="'+id+'-count"></span></div>';
-  h += '<table id="'+id+'"><thead><tr>';
-  h += '<th class="col-drag"></th><th>Title</th><th class="col-time">Time</th>';
-  flags.forEach(f=> h += '<th class="c col-flag">'+f.label+'</th>');
-  h += '<th class="col-del"></th></tr></thead><tbody>';
-  if(items.length===0){ h += '<tr class="empty-row"><td colspan="'+(4+flags.length)+'" class="empty">No quests. Add one below.</td></tr>'; }
-  else { items.forEach(it=> h += rowHtml(it, flags)); }
-  h += '</tbody></table>';
-  h += '<button class="add" onclick="addRow(\\''+id+'\\')">+ Add quest</button>';
-  return h;
+// ── Protocol row (kind fixed) ──
+function protoRow(item){
+  let c = '<td class="drag-cell"><span class="drag" draggable="true">⋮⋮</span></td>';
+  c += '<td><input type="text" class="f-title" value="'+esc(item.title)+'" oninput="setDirty(true)"></td>';
+  c += '<td class="col-time"><input type="text" class="time f-time" value="'+esc(item.time)+'" oninput="setDirty(true)"></td>';
+  c += '<td class="c col-flag"><input type="checkbox" class="f-optional" '+(item.optional?"checked":"")+' onchange="setDirty(true)"></td>';
+  c += '<td class="c col-flag"><input type="checkbox" class="f-required" '+(item.required?"checked":"")+' onchange="setDirty(true)"></td>';
+  c += '<td class="c col-del"><button class="del" onclick="this.closest(\\'tr\\').remove(); setDirty(true); refreshCounts();" title="Delete">&times;</button></td>';
+  const tr = document.createElement('tr');
+  tr.innerHTML = c;
+  return tr;
 }
 
-let currentFlags = {}; // id -> flags array
-
-function addRow(tableId){
-  const tbody = document.querySelector('#'+tableId+' tbody');
-  const emptyRow = tbody.querySelector('.empty-row'); if(emptyRow) emptyRow.remove();
-  const flags = currentFlags[tableId];
-  const tmp = document.createElement('tbody');
-  tmp.innerHTML = rowHtml({title:"",time:"",optional:0}, flags);
-  const tr = tmp.firstElementChild;
-  tbody.appendChild(tr);
-  attachDrag(tr);
+function addMerged(kind){
+  const tbody = document.querySelector('#tbl tbody');
+  const er = tbody.querySelector('.empty-row'); if(er) er.remove();
+  const tr = mergedRow({_kind:kind, title:"", time:"", optional:0, important:0, monthly:0});
+  tbody.appendChild(tr); attachDrag(tr);
+  setDirty(true); refreshCounts();
+  tr.querySelector('.f-title').focus();
+}
+function addProto(){
+  const tbody = document.querySelector('#tbl tbody');
+  const er = tbody.querySelector('.empty-row'); if(er) er.remove();
+  const tr = protoRow({title:"", time:"", optional:0, required:0});
+  tbody.appendChild(tr); attachDrag(tr);
   setDirty(true); refreshCounts();
   tr.querySelector('.f-title').focus();
 }
 
 function refreshCounts(){
-  document.querySelectorAll('table').forEach(tbl=>{
-    const countEl = document.getElementById(tbl.id+'-count');
-    if(!countEl) return;
-    const rows = tbl.querySelectorAll('tbody tr:not(.empty-row)');
-    let optional=0; rows.forEach(r=>{ const o=r.querySelector('.f-optional'); if(o&&o.checked) optional++; });
-    const total=rows.length;
-    countEl.textContent = total+' quest'+(total===1?'':'s')+(optional?(' · '+optional+' optional'):'')+' · time-sorted';
-  });
+  const rows = document.querySelectorAll('#tbl tbody tr:not(.empty-row)');
+  let optional=0; rows.forEach(r=>{ const o=r.querySelector('.f-optional'); if(o&&o.checked) optional++; });
+  const el = document.getElementById('count');
+  if(el) el.textContent = rows.length+' quest'+(rows.length===1?'':'s')+(optional?(' · '+optional+' optional'):'')+' · time-sorted';
 }
 
-// Drag reorder (visual only; save re-sorts by time regardless)
+// Drag reorder (visual; save re-sorts by time regardless)
 let dragEl=null;
 function attachDrag(tr){
   const handle = tr.querySelector('.drag');
@@ -2171,7 +2187,7 @@ function attachDrag(tr){
     setDirty(true);
   });
 }
-function attachAllDrag(){ document.querySelectorAll('#content tbody tr:not(.empty-row)').forEach(attachDrag); }
+function attachAllDrag(){ document.querySelectorAll('#tbl tbody tr:not(.empty-row)').forEach(attachDrag); }
 
 async function load(){
   document.getElementById("content").innerHTML = '<div class="empty">Loading…</div>';
@@ -2181,51 +2197,60 @@ async function load(){
     if(!r.ok) throw new Error((await r.json()).error||'Load failed');
     const data = await r.json();
     const note = document.getElementById("note");
+
     if(isProto()){
       note.textContent = 'Protocol routine for '+current+'. Rows re-order by time on save. Changes apply the next time this protocol runs.';
-      currentFlags = { 'tbl-proto':[{key:'optional',label:'Optional'},{key:'required',label:'Required'}] };
-      document.getElementById("content").innerHTML =
-        tableHtml('tbl-proto','Protocol routine', data.protocol, currentFlags['tbl-proto']);
+      let h = '<div class="section-head"><h2>Protocol routine</h2><span class="count" id="count"></span></div>';
+      h += '<table id="tbl"><thead><tr><th class="col-drag"></th><th>Title</th><th class="col-time">Time</th><th class="c col-flag">Optional</th><th class="c col-flag">Required</th><th class="col-del"></th></tr></thead><tbody></tbody></table>';
+      h += '<div class="adds"><button class="add" onclick="addProto()">+ Add quest</button></div>';
+      document.getElementById("content").innerHTML = h;
+      const tbody = document.querySelector('#tbl tbody');
+      const items = (data.protocol||[]).slice().sort((a,b)=>tmin(a.time)-tmin(b.time));
+      if(items.length===0){ tbody.innerHTML='<tr class="empty-row"><td colspan="6" class="empty">No quests. Add one below.</td></tr>'; }
+      else items.forEach(it=> tbody.appendChild(protoRow(it)));
     } else {
       const dayName = WEEKDAYS.find(w=>w[0]===current)[1];
-      note.textContent = 'Editing '+dayName+'. Changes apply the next time this day occurs — today\\'s quests are already generated.';
-      currentFlags = {
-        'tbl-daily':[{key:'optional',label:'Optional'},{key:'important',label:'Important'}],
-        'tbl-required':[{key:'optional',label:'Optional'},{key:'monthly',label:'Monthly'}]
-      };
-      document.getElementById("content").innerHTML =
-        tableHtml('tbl-daily','Daily quests', data.daily, currentFlags['tbl-daily']) +
-        tableHtml('tbl-required','Required / weekly quests', data.required, currentFlags['tbl-required']);
+      note.textContent = 'Editing '+dayName+'. Daily and required quests shown together, sorted by time. Changes apply the next time this day occurs — today\\'s quests are already generated.';
+      let h = '<div class="section-head"><h2>Quests</h2><span class="count" id="count"></span></div>';
+      h += '<table id="tbl"><thead><tr><th class="col-drag"></th><th class="col-kind">Type</th><th>Title</th><th class="col-time">Time</th><th class="c col-flag">Optional</th><th class="c col-flag">Important</th><th class="c col-flag">Monthly</th><th class="col-del"></th></tr></thead><tbody></tbody></table>';
+      h += '<div class="adds"><button class="add" onclick="addMerged(\\'daily\\')">+ Daily quest</button><button class="add req" onclick="addMerged(\\'required\\')">+ Required quest</button></div>';
+      document.getElementById("content").innerHTML = h;
+      const tbody = document.querySelector('#tbl tbody');
+      const merged = []
+        .concat((data.daily||[]).map(x=>Object.assign({_kind:"daily"},x)))
+        .concat((data.required||[]).map(x=>Object.assign({_kind:"required"},x)))
+        .sort((a,b)=>tmin(a.time)-tmin(b.time));
+      if(merged.length===0){ tbody.innerHTML='<tr class="empty-row"><td colspan="8" class="empty">No quests. Add one below.</td></tr>'; }
+      else merged.forEach(it=> tbody.appendChild(mergedRow(it)));
     }
     attachAllDrag();
     refreshCounts();
   }catch(e){ document.getElementById("content").innerHTML='<div class="empty">Error: '+esc(e.message)+'</div>'; }
 }
 
-function readTable(tableId, flags){
-  const rows = document.querySelectorAll('#'+tableId+' tbody tr:not(.empty-row)');
-  const out=[];
-  rows.forEach(r=>{
-    const item = {
-      title: r.querySelector('.f-title').value,
-      time: r.querySelector('.f-time').value
-    };
-    flags.forEach(f=>{ item[f.key] = r.querySelector('.f-'+f.key).checked ? 1 : 0; });
-    out.push(item);
-  });
-  return out;
-}
-
 async function save(){
   const btn=document.getElementById("saveBtn");
   let body;
   if(isProto()){
-    body = { protocol: readTable('tbl-proto', currentFlags['tbl-proto']) };
+    const rows = document.querySelectorAll('#tbl tbody tr:not(.empty-row)');
+    const protocol=[];
+    rows.forEach(r=>protocol.push({
+      title: r.querySelector('.f-title').value,
+      time: r.querySelector('.f-time').value,
+      optional: r.querySelector('.f-optional').checked?1:0,
+      required: r.querySelector('.f-required').checked?1:0
+    }));
+    body = { protocol };
   } else {
-    body = {
-      daily: readTable('tbl-daily', currentFlags['tbl-daily']),
-      required: readTable('tbl-required', currentFlags['tbl-required'])
-    };
+    const rows = document.querySelectorAll('#tbl tbody tr:not(.empty-row)');
+    const daily=[], required=[];
+    rows.forEach(r=>{
+      const kind=r.dataset.kind;
+      const base={ title:r.querySelector('.f-title').value, time:r.querySelector('.f-time').value, optional:r.querySelector('.f-optional').checked?1:0 };
+      if(kind==="daily"){ base.important = r.querySelector('.f-important').checked?1:0; daily.push(base); }
+      else { base.monthly = r.querySelector('.f-monthly').checked?1:0; required.push(base); }
+    });
+    body = { daily, required };
   }
   btn.disabled=true; document.getElementById("status").textContent="Saving…";
   try{
@@ -2236,7 +2261,7 @@ async function save(){
     if(!r.ok) throw new Error(data.error||'Save failed');
     setDirty(false);
     toast('Saved '+(isProto()?current:WEEKDAYS.find(w=>w[0]===current)[1]), true);
-    load(); // reload to reflect canonical time-sort + normalized times
+    load();
   }catch(e){ document.getElementById("status").textContent=""; toast(e.message, false); }
   finally{ btn.disabled=false; }
 }

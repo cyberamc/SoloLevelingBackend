@@ -159,6 +159,17 @@ function initProtocol() {
   if (!psCols.includes('noroute_date')) {
     db.prepare("ALTER TABLE protocol_state ADD COLUMN noroute_date TEXT").run();
   }
+  // Gym rotation: single-row table holding the date Week 1 of the current program began.
+  // The Gym tab picks the active 4-week Hevy folder from elapsed days since this date.
+  db.prepare(`
+    CREATE TABLE IF NOT EXISTS gym_rotation (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      start_date TEXT NOT NULL
+    )
+  `).run();
+  if (!db.prepare("SELECT id FROM gym_rotation WHERE id = 1").get()) {
+    db.prepare("INSERT INTO gym_rotation (id, start_date) VALUES (1, '2026-07-06')").run();
+  }
   // Sentinel weekly_quest_template row: protocol-injected required quests must reference
   // a real template id (weekly_quests.template_id is NOT NULL + FK). This hidden row
   // (weekday -1) satisfies the constraint and is excluded from normal generation.
@@ -811,7 +822,7 @@ app.get("/api/gym/summary", async (req, res) => {
 
 app.get("/api/gym/routines", async (req, res) => {
   try {
-    const [{ map: exerciseMap, workouts }, r1, r2, r3, r4, r5, r6] = await Promise.all([
+    const [{ map: exerciseMap, workouts }, r1, r2, r3, r4, r5, r6, foldersResp] = await Promise.all([
       buildExerciseMap(),
       hevyGet("/v1/routines?page=1&pageSize=10"),
       hevyGet("/v1/routines?page=2&pageSize=10"),
@@ -819,24 +830,45 @@ app.get("/api/gym/routines", async (req, res) => {
       hevyGet("/v1/routines?page=4&pageSize=10"),
       hevyGet("/v1/routines?page=5&pageSize=10"),
       hevyGet("/v1/routines?page=6&pageSize=10"),
+      hevyGet("/v1/routine_folders?page=1&pageSize=10"),
     ]);
     const routines = [
       ...(r1.routines || []), ...(r2.routines || []), ...(r3.routines || []),
       ...(r4.routines || []), ...(r5.routines || []), ...(r6.routines || []),
     ];
-    let currentWeek = 0;
-    for (const w of workouts.slice(0, 5)) {
-      const m = (w.title || "").match(/Week\s+(\d+)/i);
-      if (m) { currentWeek = parseInt(m[1]); break; }
+    const folders = foldersResp.routine_folders || [];
+    // Routines live in Hevy folders ("Essential Week 1 - 4", "5 - 8", "9 - 12"). Workouts no
+    // longer carry "Week N", so the active 4-week block is derived from elapsed days since the
+    // rotation start date (stored in gym_rotation). 28 days per block; 84-day cycle then repeats.
+    const startRow = db.prepare("SELECT start_date FROM gym_rotation WHERE id = 1").get();
+    const startDate = startRow ? startRow.start_date : "2026-07-06";
+    const today = db.prepare("SELECT date('now','localtime') AS d").get().d;
+    const daysElapsed = db.prepare("SELECT CAST(julianday(?) - julianday(?) AS INTEGER) AS n").get(today, startDate).n;
+    // Block index 0/1/2 within the 84-day cycle (guard against negative if start is future).
+    const cycleDay = ((daysElapsed % 84) + 84) % 84;
+    const blockIndex = Math.floor(cycleDay / 28); // 0 -> Week 1-4, 1 -> 5-8, 2 -> 9-12
+    // Match the folder by its title's low week number (1 -> block 0, 5 -> block 1, 9 -> block 2),
+    // falling back to Hevy's folder index ordering if titles don't parse.
+    const blockLow = blockIndex * 4 + 1; // 1, 5, or 9
+    let activeFolder = folders.find(f => {
+      const m = (f.title || "").match(/Week\s+(\d+)\s*-\s*\d+/i);
+      return m && parseInt(m[1]) === blockLow;
+    });
+    if (!activeFolder) {
+      activeFolder = folders.slice().sort((a, b) => (a.index ?? 0) - (b.index ?? 0))[blockIndex];
     }
-    const result = routines
-      .filter(r => {
-        if (currentWeek > 0) {
-          const m = (r.title || "").match(/Week\s+(\d+)/i);
-          return m ? parseInt(m[1]) === currentWeek : false;
-        }
-        return recentRoutineIds.has(r.id);
-      })
+    const activeFolderId = activeFolder ? activeFolder.id : null;
+    let filtered = routines.filter(r => r.folder_id === activeFolderId);
+    // Last-resort: never return blank -> distinct routines by title.
+    if (filtered.length === 0) {
+      const seen = new Set();
+      filtered = routines.filter(r => {
+        const t = (r.title || "").trim();
+        if (!t || seen.has(t)) return false;
+        seen.add(t); return true;
+      });
+    }
+    const result = filtered
       .map(r => ({
         routine_id: r.id,
         title: r.title,
@@ -873,6 +905,32 @@ app.get("/api/gym/history/:exerciseId", async (req, res) => {
     console.error("Hevy /history error:", e.message);
     res.status(500).json({ error: e.message });
   }
+});
+
+// ─── Gym rotation control ──────────────────────────────────────────────────────
+// GET current rotation start date + which block is active today.
+app.get("/api/gym/rotation", (req, res) => {
+  const row = db.prepare("SELECT start_date FROM gym_rotation WHERE id = 1").get();
+  const startDate = row ? row.start_date : null;
+  let block = null, daysElapsed = null;
+  if (startDate) {
+    const today = db.prepare("SELECT date('now','localtime') AS d").get().d;
+    daysElapsed = db.prepare("SELECT CAST(julianday(?) - julianday(?) AS INTEGER) AS n").get(today, startDate).n;
+    const cycleDay = ((daysElapsed % 84) + 84) % 84;
+    block = Math.floor(cycleDay / 28) + 1; // 1, 2, or 3
+  }
+  res.json({ startDate, daysElapsed, block });
+});
+
+// POST reset: restart the rotation. Body { start_date } optional; defaults to today.
+app.post("/api/gym/rotation/reset", (req, res) => {
+  const today = db.prepare("SELECT date('now','localtime') AS d").get().d;
+  const sd = (req.body && req.body.start_date) ? req.body.start_date : today;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(sd)) {
+    return res.status(400).json({ error: "start_date must be YYYY-MM-DD" });
+  }
+  db.prepare("UPDATE gym_rotation SET start_date = ? WHERE id = 1").run(sd);
+  res.json({ success: true, start_date: sd });
 });
 
 // ─── Notepad (single shared scratchpad) ───────────────────────────────────────

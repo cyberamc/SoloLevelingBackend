@@ -1070,6 +1070,93 @@ function initHouseholdInventory() {
 initFoodInventory();
 initHouseholdInventory();
 
+// Core daily routine reference — the everyday "autopilot" tasks, shown read-only
+// in the app (Daily Routine card) and on the /routine web page. Single source of
+// truth: this table. Edit rows here to change the reference everywhere.
+function initRoutineReference() {
+  db.prepare(`
+    CREATE TABLE IF NOT EXISTS routine_reference (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      sort_order INTEGER NOT NULL,
+      title TEXT NOT NULL
+    )
+  `).run();
+  // Migration: add section column if upgrading an existing table (wfm | delivery).
+  const cols = db.prepare("PRAGMA table_info(routine_reference)").all().map(c => c.name);
+  if (!cols.includes('section')) {
+    db.prepare("ALTER TABLE routine_reference ADD COLUMN section TEXT NOT NULL DEFAULT 'wfm'").run();
+  }
+  const count = db.prepare("SELECT COUNT(*) as count FROM routine_reference").get();
+  if (count.count === 0) {
+    const insert = db.prepare("INSERT INTO routine_reference (sort_order, title, section) VALUES (?, ?, ?)");
+    const wfm = [
+      "5:45 AM - Wake Up",
+      "Bathroom, Teeth, Clothes, Hair, & Supplement Drink",
+      "6:00 AM - Walk Toby & Turn Off Lights",
+      "Move Trash Bin (Monday & Thursday)",
+      "6:15 AM - Bed, Trash, Supplement Drink, Ice, & Protein Shake",
+      "Grab Water Jug (Monday & Thursday)",
+      "6:30 AM - Pickup Dad",
+      "6:45 AM - Gym (Mon, Tues, & Thurs to Sat)",
+      "6:50 AM - Donate Plasma (Sunday & Wednesday)",
+      "Water Refill (Monday & Thursday)",
+      "7:30 AM - Air Humidifier & Protein Shake",
+      "7:35 AM - One Hour Of Day Specific Tasks",
+      "9:00 AM - Prepare Clothes & Shower",
+      "9:20 AM - Clean Hearing Aids & Meditate",
+      "9:30 AM - Feed Toby & Luna",
+      "9:40 AM - Chill",
+      "10:10 AM - Cook Lunch, Eat, Clean, & Prepare Dinner",
+      "11:00 AM - Study",
+      "11:45 AM - Prepare For Work & Air Humidifier",
+      "3:00 PM - Cook Rice",
+      "3:30 PM - Bake Pork",
+      "4:00 PM - Sear Pork",
+      "4:20 PM - Eat Dessert",
+      "4:40 PM - Clean & Prepare Soda",
+      "7:00 PM - Brush Teeth",
+      "8:00 PM - Take & Prepare Evening Supplement",
+      "9:00 PM - Walk Toby & Turn On Lights"
+    ];
+    const delivery = [
+      "5:15 AM - Wake Up",
+      "Bathroom, Teeth, Clothes, Hair, & Supplement Drink",
+      "5:30 AM - Walk Toby & Turn Off Lights",
+      "5:45 AM - Bed, Supplement, Ice, & Protein Shake",
+      "6:00 AM - Gym",
+      "6:30 AM - Pickup Dad",
+      "6:40 AM - Lunch & Snack",
+      "4:30 PM - Wash & Vacuum Car",
+      "5:00 PM - Shower, Dinner, & Dessert",
+      "6:00 PM - Feed Toby & Luna",
+      "6:10 PM - Meditate",
+      "6:15 PM - Take & Prepare Evening Supplement",
+      "6:20 PM - Brush Teeth",
+      "6:25 PM - Walk Toby & Turn On Lights"
+    ];
+    let idx = 0;
+    wfm.forEach(title => insert.run(idx++, title, 'wfm'));
+    delivery.forEach(title => insert.run(idx++, title, 'delivery'));
+    console.log("routine_reference seeded: " + wfm.length + " wfm + " + delivery.length + " delivery");
+  }
+}
+initRoutineReference();
+
+// Today's routine section: WFM = Sun-Thu (weekday 0-4), Delivery = Fri/Sat (5-6).
+function routineSectionForToday() {
+  const wd = new Date().getDay(); // 0=Sun..6=Sat, local time
+  return (wd === 5 || wd === 6) ? 'delivery' : 'wfm';
+}
+
+// GET /api/routine-reference — returns ONLY today's schedule (WFM or Delivery),
+// with a label. Open (no auth) so the Android app can fetch it without login.
+app.get("/api/routine-reference", (req, res) => {
+  const section = routineSectionForToday();
+  const rows = db.prepare("SELECT sort_order, title FROM routine_reference WHERE section = ? ORDER BY sort_order").all(section);
+  const label = section === 'delivery' ? 'Delivery Day' : 'WFM';
+  res.json({ section, label, items: rows });
+});
+
 app.get("/api/food-inventory", (req, res) => {
   const items = db.prepare("SELECT * FROM food_inventory ORDER BY level ASC, name ASC").all();
   res.json(items);
@@ -1716,10 +1803,10 @@ function weekBillable(w) {
   return tueBillable * tueRate + wedBillable * wedRate;
 }
 
-// Pay date for a delivery week = that week's Wednesday (week_start + 3) + 16 days
+// Pay date for a delivery week = that week's Wednesday (week_start + 3) + 20 days
 function payDateFor(weekStartStr) {
   const d = new Date(weekStartStr + 'T12:00:00');
-  d.setDate(d.getDate() + 3 + 16);
+  d.setDate(d.getDate() + 3 + 20);
   return d.toISOString().split('T')[0];
 }
 
@@ -1772,9 +1859,66 @@ function speedxByCheckForMonth(monthId) {
   return map;
 }
 
-// Delivery weeks for a given bookkeeping month (generates them if missing).
-// If no month specified, default to the most recent bookkeeping month.
+// A delivery week's WORKED month = the month its Wednesday (week_start + 3) falls in.
+function workedMonthFor(weekStartStr) {
+  const d = new Date(weekStartStr + 'T12:00:00');
+  d.setDate(d.getDate() + 3);
+  return d.toISOString().split('T')[0].slice(0, 7);
+}
+// All week_start Sundays whose WORKED month (Wednesday's month) is the given YYYY-MM.
+function weekStartsForWorkedMonth(ym) {
+  const [y, m] = ym.split('-').map(Number);
+  const firstOfMonth = new Date(Date.UTC(y, m - 1, 1, 12));
+  const scan = new Date(firstOfMonth);
+  scan.setUTCDate(scan.getUTCDate() - 14);
+  while (scan.getUTCDay() !== 0) scan.setUTCDate(scan.getUTCDate() + 1);
+  const out = [];
+  const cur = new Date(scan);
+  for (let i = 0; i < 8; i++) {
+    const ws = cur.toISOString().split('T')[0];
+    if (workedMonthFor(ws) === ym) out.push(ws);
+    cur.setUTCDate(cur.getUTCDate() + 7);
+  }
+  return out;
+}
+
+// Delivery weeks for a given month (generates them if missing).
+// Two modes:
+//   ?worked_month=YYYY-MM  -> tracker view: weeks grouped by the month they're
+//     WORKED in (Wednesday's month). month_id/check_number stay on pay-month so
+//     bookkeeping SpeedX income is unaffected. The current worked week appears
+//     immediately even if its pay-month hasn't been created yet.
+//   ?month_id=N            -> legacy pay-month view (unchanged).
+// If neither specified, default to the most recent bookkeeping month.
 app.get("/api/delivery-weeks", (req, res) => {
+  if (req.query.worked_month) {
+    const ym = req.query.worked_month;
+    const starts = weekStartsForWorkedMonth(ym);
+    if (starts.length === 0) return res.json([]);
+    // Lazily ensure each worked week's row exists, assigning month_id/check_number
+    // by its PAY month (never overwriting an existing row's assignment).
+    starts.forEach((ws) => {
+      const existing = db.prepare("SELECT id FROM delivery_weeks WHERE week_start = ?").get(ws);
+      if (!existing) {
+        const payYm = payMonthFor(ws);
+        const payMonth = db.prepare("SELECT * FROM bookkeeping_months WHERE month = ?").get(payYm);
+        if (payMonth) {
+          const cnt = db.prepare("SELECT COUNT(*) AS n FROM delivery_weeks WHERE month_id = ?").get(payMonth.id).n;
+          db.prepare("INSERT INTO delivery_weeks (week_start, month_id, check_number) VALUES (?, ?, ?)")
+            .run(ws, payMonth.id, cnt + 1);
+        } else {
+          db.prepare("INSERT INTO delivery_weeks (week_start, month_id, check_number) VALUES (?, NULL, NULL)")
+            .run(ws);
+        }
+      }
+    });
+    const weeks = db.prepare(
+      "SELECT * FROM delivery_weeks WHERE week_start IN (" +
+      starts.map(() => "?").join(",") + ") ORDER BY week_start"
+    ).all(...starts);
+    return res.json(weeks);
+  }
+
   let month;
   if (req.query.month_id) {
     month = db.prepare("SELECT * FROM bookkeeping_months WHERE id = ?").get(req.query.month_id);
@@ -1991,7 +2135,13 @@ app.post("/api/routine-editor/:tab", (req, res) => {
       );
       cleanDaily.forEach(it => ins.run(it.title, it.time, it.optional, wd, it.important));
     }
-    // Required (weekly): delete this weekday's non-sentinel rows, re-insert
+    // Required (weekly): materialized weekly_quests rows reference templates by id
+    // (FK). A template rebuild assigns new ids, so first remove this weekday's
+    // dependent weekly_quests (preserving protocol-injected sentinel rows), then
+    // replace the templates. weekly_quests re-materialize on the next daily cycle.
+    db.prepare(
+      "DELETE FROM weekly_quests WHERE weekday = ? AND template_id != ?"
+    ).run(wd, PROTOCOL_SENTINEL_ID());
     db.prepare(
       "DELETE FROM weekly_quest_templates WHERE weekday = ? AND title != '__PROTOCOL_SENTINEL__'"
     ).run(wd);
@@ -2266,6 +2416,335 @@ async function save(){
 window.addEventListener('beforeunload', e=>{ if(dirty){ e.preventDefault(); e.returnValue=''; } });
 
 buildTabs(); highlightTab(); load();
+</script>
+</body>
+</html>`;
+  res.send(html);
+});
+
+
+// ─── Daily Routine reference page (read-only, protected) ──────────────────────
+// Shows the core everyday routine from routine_reference. Gated with requireAuth
+// to match /routines, /notepad, /bookkeeping, /reminders.
+app.get("/routine", requireAuth, (req, res) => {
+  const section = routineSectionForToday();
+  const label = section === 'delivery' ? 'Delivery Day (Fri/Sat)' : 'WFM (Sun-Thu)';
+  const rows = db.prepare("SELECT title FROM routine_reference WHERE section = ? ORDER BY sort_order").all(section);
+  const listItems = rows.map(r =>
+    `<li>${r.title.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")}</li>`
+  ).join("");
+  const html = `<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Daily Routine</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #0a0a1a; color: #ddd; font-family: -apple-system, sans-serif; padding: 16px; max-width: 700px; margin: 0 auto; }
+  h1 { color: #fff; font-size: 24px; margin-bottom: 4px; }
+  .subtitle { color: #888; font-size: 13px; margin-bottom: 18px; }
+  .badge { display: inline-block; background: #23234a; color: #b9b9ff; font-size: 12px; font-weight: 600; padding: 3px 10px; border-radius: 999px; margin-bottom: 14px; }
+  .card { background: #12122a; border: 1px solid #2a2a3a; border-radius: 8px; padding: 8px 6px; }
+  ol { list-style: none; counter-reset: item; }
+  li { counter-increment: item; padding: 11px 14px; border-bottom: 1px solid #1e1e30; font-size: 15px; color: #cfcfe0; display: flex; align-items: baseline; }
+  li:last-child { border-bottom: none; }
+  li::before { content: counter(item); color: #555; font-size: 12px; width: 26px; flex: none; }
+</style>
+</head>
+<body>
+<h1>Daily Routine</h1>
+<div class="subtitle">Today's schedule. Reference only.</div>
+<div class="badge">${label}</div>
+<div class="card">
+  <ol>${listItems}</ol>
+</div>
+</body>
+</html>`;
+  res.send(html);
+});
+
+
+// ─── Reminders (user-created one-time notifications) ──────────────────────────
+function initReminders() {
+  db.prepare(`
+    CREATE TABLE IF NOT EXISTS reminders (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      title TEXT NOT NULL,
+      remind_at TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+      fired INTEGER NOT NULL DEFAULT 0
+    )
+  `).run();
+}
+initReminders();
+
+// Remove reminders that are done with: already fired, or more than a day past due
+// (the day of grace means a reminder isn't silently deleted before the phone polls).
+function purgeOldReminders() {
+  db.prepare(`
+    DELETE FROM reminders
+    WHERE fired = 1
+       OR remind_at < datetime('now','localtime','-1 day')
+  `).run();
+}
+
+// Pending = not yet fired and not yet past due. Sorted soonest first.
+app.get("/api/reminders", (req, res) => {
+  purgeOldReminders();
+  const rows = db.prepare(`
+    SELECT id, title, remind_at, created_at
+    FROM reminders
+    WHERE fired = 0
+      AND remind_at >= datetime('now','localtime')
+    ORDER BY remind_at ASC
+  `).all();
+  res.json({ reminders: rows });
+});
+
+app.post("/api/reminders", (req, res) => {
+  const title = (req.body && req.body.title ? String(req.body.title) : "").trim();
+  const date = (req.body && req.body.date ? String(req.body.date) : "").trim();
+  const time = (req.body && req.body.time ? String(req.body.time) : "").trim();
+
+  if (!title) return res.status(400).json({ error: "title is required" });
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+    return res.status(400).json({ error: "date must be YYYY-MM-DD" });
+  }
+  if (!/^\d{2}:\d{2}$/.test(time)) {
+    return res.status(400).json({ error: "time must be HH:MM (24h)" });
+  }
+  const remindAt = `${date} ${time}:00`;
+
+  const info = db.prepare(
+    "INSERT INTO reminders (title, remind_at) VALUES (?, ?)"
+  ).run(title, remindAt);
+
+  res.json({ success: true, id: info.lastInsertRowid, remind_at: remindAt });
+});
+
+// Phone calls this after showing the notification so the row is retired.
+app.post("/api/reminders/:id/fired", (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  if (!Number.isFinite(id)) return res.status(400).json({ error: "bad id" });
+  db.prepare("UPDATE reminders SET fired = 1 WHERE id = ?").run(id);
+  res.json({ success: true });
+});
+
+app.delete("/api/reminders/:id", (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  if (!Number.isFinite(id)) return res.status(400).json({ error: "bad id" });
+  db.prepare("DELETE FROM reminders WHERE id = ?").run(id);
+  res.json({ success: true });
+});
+
+app.get("/reminders", requireAuth, (req, res) => {
+  const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Reminders</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #0a0a1a; color: #ddd; font-family: -apple-system, sans-serif; padding: 16px; max-width: 700px; margin: 0 auto; }
+  h1 { color: #fff; font-size: 24px; margin-bottom: 4px; }
+  .subtitle { color: #888; font-size: 13px; margin-bottom: 18px; }
+  .card { background: #12122a; border: 1px solid #2a2a3a; border-radius: 8px; padding: 14px; margin-bottom: 18px; }
+  label { display: block; font-size: 11px; color: #777; margin-bottom: 4px; }
+  input[type=text], input[type=date], input[type=time] {
+    width: 100%; background: #0e0e1e; border: 1px solid #2a2a3a; border-radius: 6px;
+    color: #fff; font-size: 15px; padding: 9px 10px; font-family: inherit;
+  }
+  .row { display: flex; gap: 10px; margin-top: 10px; }
+  .row > div { flex: 1; }
+  .warn { display: none; background: #2a2010; border: 1px solid #5c4a1e; border-left: 3px solid #f59e0b;
+          border-radius: 6px; padding: 9px 12px; font-size: 12px; color: #e5b567; margin-top: 10px; }
+  .warn.show { display: block; }
+  button.primary { width: 100%; margin-top: 12px; background: #7b8cde; border: none; color: #fff;
+                   font-size: 15px; font-weight: bold; padding: 11px; border-radius: 8px; cursor: pointer; font-family: inherit; }
+  button.primary:disabled { opacity: .5; cursor: default; }
+  h2 { color: #fff; font-size: 17px; margin-bottom: 8px; }
+  .count { color: #888; font-size: 13px; font-weight: normal; }
+  table { width: 100%; border-collapse: collapse; background: #12122a; border: 1px solid #2a2a3a; border-radius: 8px; overflow: hidden; }
+  th { text-align: left; font-size: 11px; color: #777; font-weight: normal; padding: 8px 10px; border-bottom: 1px solid #2a2a3a; }
+  td { padding: 9px 10px; border-bottom: 1px solid #1e1e30; vertical-align: middle; font-size: 14px; }
+  tr:last-child td { border-bottom: none; }
+  td.when { color: #9ab; white-space: nowrap; font-size: 13px; }
+  td.soon { color: #e5b567; }
+  .del { background: none; border: none; color: #a55; font-size: 17px; cursor: pointer; line-height: 1; padding: 2px 6px; }
+  .del:hover { color: #e77; }
+  .empty { color: #666; font-size: 13px; padding: 14px 10px; text-align: center; }
+  #toast { position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%); padding: 10px 18px;
+           border-radius: 8px; font-size: 14px; opacity: 0; transition: opacity .2s; pointer-events: none; }
+  #toast.ok { background: #1e3a2a; color: #7fd6a0; border: 1px solid #2f5c44; }
+  #toast.err { background: #3a1e1e; color: #e78; border: 1px solid #5c2f2f; }
+  #toast.show { opacity: 1; }
+</style>
+</head>
+<body>
+<h1>Reminders</h1>
+<div class="subtitle">One-time notifications sent to your phone.</div>
+
+<div class="card">
+  <label>What</label>
+  <input type="text" id="title" placeholder="e.g. Call the vet" autocomplete="off">
+  <div class="row">
+    <div>
+      <label>Date</label>
+      <input type="date" id="date">
+    </div>
+    <div>
+      <label>Time</label>
+      <input type="time" id="time">
+    </div>
+  </div>
+  <div class="warn" id="warn">Under 30 minutes away — open the app after saving so it arms right away.</div>
+  <button class="primary" id="addBtn" onclick="addReminder()">Add reminder</button>
+</div>
+
+<h2>Pending <span class="count" id="count"></span></h2>
+<table>
+  <thead><tr><th>What</th><th>When</th><th></th></tr></thead>
+  <tbody id="list"><tr><td colspan="3" class="empty">Loading…</td></tr></tbody>
+</table>
+
+<div id="toast"></div>
+
+<script>
+const LEAD_MIN = 30;
+
+function toast(msg, ok){
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.className = (ok ? 'ok' : 'err') + ' show';
+  setTimeout(()=>{ t.className = ok ? 'ok' : 'err'; }, 2600);
+}
+
+function pad(n){ return String(n).padStart(2,'0'); }
+
+// Default the form to today and the next round half-hour.
+function seedDefaults(){
+  const now = new Date();
+  const d = new Date(now.getTime() + 60*60*1000);
+  document.getElementById('date').value =
+    d.getFullYear()+'-'+pad(d.getMonth()+1)+'-'+pad(d.getDate());
+  document.getElementById('time').value = pad(d.getHours())+':'+pad(d.getMinutes());
+}
+
+function chosenDate(){
+  const d = document.getElementById('date').value;
+  const t = document.getElementById('time').value;
+  if(!d || !t) return null;
+  const parts = d.split('-').map(Number);
+  const tp = t.split(':').map(Number);
+  return new Date(parts[0], parts[1]-1, parts[2], tp[0], tp[1], 0, 0);
+}
+
+// Show the amber warning only when the chosen time is under the lead window.
+function checkLead(){
+  const when = chosenDate();
+  const warn = document.getElementById('warn');
+  if(!when){ warn.classList.remove('show'); return; }
+  const diffMin = (when.getTime() - Date.now()) / 60000;
+  if(diffMin < LEAD_MIN){ warn.classList.add('show'); }
+  else { warn.classList.remove('show'); }
+}
+
+document.getElementById('date').addEventListener('input', checkLead);
+document.getElementById('time').addEventListener('input', checkLead);
+
+function fmtWhen(s){
+  // s is "YYYY-MM-DD HH:MM:SS" local
+  const p = s.split(' ');
+  const d = p[0].split('-').map(Number);
+  const t = p[1].split(':').map(Number);
+  const dt = new Date(d[0], d[1]-1, d[2], t[0], t[1]);
+  const now = new Date();
+  const sameDay = dt.toDateString() === now.toDateString();
+  const tomorrow = new Date(now.getTime() + 86400000);
+  const isTomorrow = dt.toDateString() === tomorrow.toDateString();
+  let h = dt.getHours(); const m = pad(dt.getMinutes());
+  const ap = h >= 12 ? 'PM' : 'AM';
+  h = h % 12; if(h === 0) h = 12;
+  const time = h+':'+m+' '+ap;
+  if(sameDay) return 'Today ' + time;
+  if(isTomorrow) return 'Tomorrow ' + time;
+  const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  return months[dt.getMonth()]+' '+dt.getDate()+', '+time;
+}
+
+function minutesUntil(s){
+  const p = s.split(' ');
+  const d = p[0].split('-').map(Number);
+  const t = p[1].split(':').map(Number);
+  const dt = new Date(d[0], d[1]-1, d[2], t[0], t[1]);
+  return (dt.getTime() - Date.now()) / 60000;
+}
+
+async function load(){
+  try{
+    const r = await fetch('/api/reminders');
+    const data = await r.json();
+    const list = data.reminders || [];
+    const tb = document.getElementById('list');
+    document.getElementById('count').textContent = list.length ? '· ' + list.length : '';
+    if(!list.length){
+      tb.innerHTML = '<tr><td colspan="3" class="empty">No pending reminders.</td></tr>';
+      return;
+    }
+    tb.innerHTML = list.map(function(r){
+      const soon = minutesUntil(r.remind_at) < LEAD_MIN ? ' soon' : '';
+      const safeTitle = String(r.title)
+        .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+      return '<tr>' +
+        '<td>' + safeTitle + '</td>' +
+        '<td class="when' + soon + '">' + fmtWhen(r.remind_at) + '</td>' +
+        '<td style="text-align:right"><button class="del" onclick="delReminder(' + r.id + ')">&times;</button></td>' +
+        '</tr>';
+    }).join('');
+  }catch(e){
+    document.getElementById('list').innerHTML =
+      '<tr><td colspan="3" class="empty">Could not load reminders.</td></tr>';
+  }
+}
+
+async function addReminder(){
+  const btn = document.getElementById('addBtn');
+  const title = document.getElementById('title').value.trim();
+  const date = document.getElementById('date').value;
+  const time = document.getElementById('time').value;
+  if(!title){ toast('Enter what the reminder is for', false); return; }
+  if(!date || !time){ toast('Pick a date and time', false); return; }
+  const when = chosenDate();
+  if(when && when.getTime() <= Date.now()){ toast('That time has already passed', false); return; }
+
+  btn.disabled = true;
+  try{
+    const r = await fetch('/api/reminders', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: title, date: date, time: time })
+    });
+    const data = await r.json();
+    if(!r.ok) throw new Error(data.error || 'Failed to save');
+    document.getElementById('title').value = '';
+    toast('Reminder added', true);
+    load();
+  }catch(e){ toast(e.message, false); }
+  finally{ btn.disabled = false; }
+}
+
+async function delReminder(id){
+  try{
+    const r = await fetch('/api/reminders/' + id, { method: 'DELETE' });
+    if(!r.ok) throw new Error('Failed to delete');
+    load();
+  }catch(e){ toast(e.message, false); }
+}
+
+seedDefaults(); checkLead(); load();
+setInterval(load, 60000);
 </script>
 </body>
 </html>`;

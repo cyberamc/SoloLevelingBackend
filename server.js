@@ -2427,12 +2427,13 @@ buildTabs(); highlightTab(); load();
 // Shows the core everyday routine from routine_reference. Gated with requireAuth
 // to match /routines, /notepad, /bookkeeping, /reminders.
 app.get("/routine", requireAuth, (req, res) => {
-  const section = routineSectionForToday();
-  const label = section === 'delivery' ? 'Delivery Day (Fri/Sat)' : 'WFM (Sun-Thu)';
-  const rows = db.prepare("SELECT title FROM routine_reference WHERE section = ? ORDER BY sort_order").all(section);
-  const listItems = rows.map(r =>
-    `<li>${r.title.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")}</li>`
-  ).join("");
+  const esc = s => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const buildList = (section) => {
+    const rows = db.prepare("SELECT title FROM routine_reference WHERE section = ? ORDER BY sort_order").all(section);
+    return rows.map(r => `<li>${esc(r.title)}</li>`).join("");
+  };
+  const wfmItems = buildList('wfm');
+  const deliveryItems = buildList('delivery');
   const html = `<!DOCTYPE html>
 <html>
 <head>
@@ -2441,23 +2442,32 @@ app.get("/routine", requireAuth, (req, res) => {
 <title>Daily Routine</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { background: #0a0a1a; color: #ddd; font-family: -apple-system, sans-serif; padding: 16px; max-width: 700px; margin: 0 auto; }
+  body { background: #0a0a1a; color: #ddd; font-family: -apple-system, sans-serif; padding: 16px; max-width: 1000px; margin: 0 auto; }
   h1 { color: #fff; font-size: 24px; margin-bottom: 4px; }
   .subtitle { color: #888; font-size: 13px; margin-bottom: 18px; }
-  .badge { display: inline-block; background: #23234a; color: #b9b9ff; font-size: 12px; font-weight: 600; padding: 3px 10px; border-radius: 999px; margin-bottom: 14px; }
+  .columns { display: flex; gap: 16px; align-items: flex-start; }
+  .column { flex: 1 1 0; min-width: 0; }
+  .col-head { color: #b9b9ff; font-size: 13px; font-weight: 700; letter-spacing: 1px; text-transform: uppercase; margin-bottom: 10px; }
   .card { background: #12122a; border: 1px solid #2a2a3a; border-radius: 8px; padding: 8px 6px; }
   ol { list-style: none; counter-reset: item; }
   li { counter-increment: item; padding: 11px 14px; border-bottom: 1px solid #1e1e30; font-size: 15px; color: #cfcfe0; display: flex; align-items: baseline; }
   li:last-child { border-bottom: none; }
   li::before { content: counter(item); color: #555; font-size: 12px; width: 26px; flex: none; }
+  @media (max-width: 640px) { .columns { flex-direction: column; } }
 </style>
 </head>
 <body>
 <h1>Daily Routine</h1>
-<div class="subtitle">Today's schedule. Reference only.</div>
-<div class="badge">${label}</div>
-<div class="card">
-  <ol>${listItems}</ol>
+<div class="subtitle">Both schedules. Reference only.</div>
+<div class="columns">
+  <div class="column">
+    <div class="col-head">WFM (Sun-Thu)</div>
+    <div class="card"><ol>${wfmItems}</ol></div>
+  </div>
+  <div class="column">
+    <div class="col-head">Delivery (Fri/Sat)</div>
+    <div class="card"><ol>${deliveryItems}</ol></div>
+  </div>
 </div>
 </body>
 </html>`;

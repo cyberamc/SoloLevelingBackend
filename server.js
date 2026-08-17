@@ -2486,8 +2486,91 @@ function initReminders() {
       fired INTEGER NOT NULL DEFAULT 0
     )
   `).run();
+  // Migration: tag rows generated from a recurring rule so we can dedupe / trace them.
+  const cols = db.prepare("PRAGMA table_info(reminders)").all().map(c => c.name);
+  if (!cols.includes('source_recurring_id')) {
+    db.prepare("ALTER TABLE reminders ADD COLUMN source_recurring_id INTEGER DEFAULT NULL").run();
+  }
+  // Recurring reminder RULES. Each active rule materializes its next occurrence into
+  // the reminders table (see materializeRecurringReminders), so the phone — which just
+  // polls /api/reminders — needs no changes. type: 'daily' | 'weekly' | 'monthly'.
+  //   time_str      : "HH:MM" 24h, the fire time
+  //   weekdays      : CSV of 0-6 (Sun-Sat) for weekly, e.g. "1,3,5"
+  //   day_of_month  : 1-31 for monthly (clamped to month length)
+  db.prepare(`
+    CREATE TABLE IF NOT EXISTS recurring_reminders (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      title TEXT NOT NULL,
+      type TEXT NOT NULL,
+      time_str TEXT NOT NULL,
+      weekdays TEXT,
+      day_of_month INTEGER,
+      active INTEGER NOT NULL DEFAULT 1,
+      created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+    )
+  `).run();
 }
 initReminders();
+
+// Format a JS Date as the "YYYY-MM-DD HH:MM:SS" local string reminders use.
+function fmtRemindAt(d) {
+  const p = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:00`;
+}
+
+// Compute the next occurrence (JS Date strictly after `from`) for a recurring rule.
+function nextOccurrence(rule, from) {
+  const [hh, mm] = rule.time_str.split(':').map(Number);
+  if (rule.type === 'daily') {
+    const c = new Date(from.getFullYear(), from.getMonth(), from.getDate(), hh, mm, 0, 0);
+    if (c <= from) c.setDate(c.getDate() + 1);
+    return c;
+  }
+  if (rule.type === 'weekly') {
+    const days = String(rule.weekdays || '').split(',').map(s => parseInt(s, 10)).filter(n => n >= 0 && n <= 6);
+    if (days.length === 0) return null;
+    // Scan the next 8 days for the soonest selected weekday at the fire time > from.
+    for (let i = 0; i < 8; i++) {
+      const c = new Date(from.getFullYear(), from.getMonth(), from.getDate() + i, hh, mm, 0, 0);
+      if (c > from && days.includes(c.getDay())) return c;
+    }
+    return null;
+  }
+  if (rule.type === 'monthly') {
+    const dom = rule.day_of_month;
+    // Try this month, then following months; clamp to the month's last day.
+    for (let i = 0; i < 3; i++) {
+      const y = from.getFullYear();
+      const m = from.getMonth() + i;
+      const lastDay = new Date(y, m + 1, 0).getDate();
+      const day = Math.min(dom, lastDay);
+      const c = new Date(y, m, day, hh, mm, 0, 0);
+      if (c > from) return c;
+    }
+    return null;
+  }
+  return null;
+}
+
+// For each active recurring rule, ensure its next occurrence exists as an un-fired
+// reminders row. Idempotent: won't duplicate a row already sitting for that rule+time.
+function materializeRecurringReminders() {
+  const rules = db.prepare("SELECT * FROM recurring_reminders WHERE active = 1").all();
+  const now = new Date();
+  rules.forEach(rule => {
+    const next = nextOccurrence(rule, now);
+    if (!next) return;
+    const remindAt = fmtRemindAt(next);
+    const existing = db.prepare(
+      "SELECT id FROM reminders WHERE source_recurring_id = ? AND remind_at = ? AND fired = 0"
+    ).get(rule.id, remindAt);
+    if (!existing) {
+      db.prepare(
+        "INSERT INTO reminders (title, remind_at, source_recurring_id) VALUES (?, ?, ?)"
+      ).run(rule.title, remindAt, rule.id);
+    }
+  });
+}
 
 // Remove reminders that are done with: already fired, or more than a day past due
 // (the day of grace means a reminder isn't silently deleted before the phone polls).
@@ -2500,7 +2583,9 @@ function purgeOldReminders() {
 }
 
 // Pending = not yet fired and not yet past due. Sorted soonest first.
+// Materialize recurring occurrences first so the phone's poll sees them.
 app.get("/api/reminders", (req, res) => {
+  materializeRecurringReminders();
   purgeOldReminders();
   const rows = db.prepare(`
     SELECT id, title, remind_at, created_at
@@ -2510,6 +2595,54 @@ app.get("/api/reminders", (req, res) => {
     ORDER BY remind_at ASC
   `).all();
   res.json({ reminders: rows });
+});
+
+// ─── Recurring reminder rules ─────────────────────────────────────────────────
+app.get("/api/recurring-reminders", (req, res) => {
+  const rows = db.prepare("SELECT * FROM recurring_reminders WHERE active = 1 ORDER BY id DESC").all();
+  res.json({ recurring: rows });
+});
+
+app.post("/api/recurring-reminders", (req, res) => {
+  const b = req.body || {};
+  const title = (b.title ? String(b.title) : "").trim();
+  const type = (b.type ? String(b.type) : "").trim();
+  const time = (b.time ? String(b.time) : "").trim();
+  if (!title) return res.status(400).json({ error: "title is required" });
+  if (!["daily", "weekly", "monthly"].includes(type)) {
+    return res.status(400).json({ error: "type must be daily, weekly, or monthly" });
+  }
+  if (!/^\d{2}:\d{2}$/.test(time)) {
+    return res.status(400).json({ error: "time must be HH:MM (24h)" });
+  }
+  let weekdays = null;
+  let dayOfMonth = null;
+  if (type === "weekly") {
+    const arr = Array.isArray(b.weekdays) ? b.weekdays : [];
+    const clean = arr.map(n => parseInt(n, 10)).filter(n => n >= 0 && n <= 6);
+    if (clean.length === 0) return res.status(400).json({ error: "pick at least one weekday" });
+    weekdays = clean.sort((a, c) => a - c).join(",");
+  }
+  if (type === "monthly") {
+    dayOfMonth = parseInt(b.day_of_month, 10);
+    if (!(dayOfMonth >= 1 && dayOfMonth <= 31)) {
+      return res.status(400).json({ error: "day_of_month must be 1-31" });
+    }
+  }
+  const info = db.prepare(
+    "INSERT INTO recurring_reminders (title, type, time_str, weekdays, day_of_month) VALUES (?, ?, ?, ?, ?)"
+  ).run(title, type, time, weekdays, dayOfMonth);
+  materializeRecurringReminders();
+  res.json({ success: true, id: info.lastInsertRowid });
+});
+
+app.delete("/api/recurring-reminders/:id", (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  if (!Number.isFinite(id)) return res.status(400).json({ error: "bad id" });
+  db.prepare("DELETE FROM recurring_reminders WHERE id = ?").run(id);
+  // Also drop any un-fired materialized rows for this rule so it stops firing.
+  db.prepare("DELETE FROM reminders WHERE source_recurring_id = ? AND fired = 0").run(id);
+  res.json({ success: true });
 });
 
 app.post("/api/reminders", (req, res) => {
@@ -2562,10 +2695,14 @@ app.get("/reminders", requireAuth, (req, res) => {
   .subtitle { color: #888; font-size: 13px; margin-bottom: 18px; }
   .card { background: #12122a; border: 1px solid #2a2a3a; border-radius: 8px; padding: 14px; margin-bottom: 18px; }
   label { display: block; font-size: 11px; color: #777; margin-bottom: 4px; }
-  input[type=text], input[type=date], input[type=time] {
+  input[type=text], input[type=date], input[type=time], input[type=number], select {
     width: 100%; background: #0e0e1e; border: 1px solid #2a2a3a; border-radius: 6px;
     color: #fff; font-size: 15px; padding: 9px 10px; font-family: inherit;
   }
+  .weekdays { display: flex; gap: 6px; flex-wrap: wrap; }
+  .wd { flex: 1; min-width: 38px; text-align: center; background: #0e0e1e; border: 1px solid #2a2a3a;
+        border-radius: 6px; color: #999; font-size: 13px; padding: 8px 4px; cursor: pointer; user-select: none; }
+  .wd.on { background: #2a3a5c; border-color: #4a6cae; color: #cfe0ff; }
   .row { display: flex; gap: 10px; margin-top: 10px; }
   .row > div { flex: 1; }
   .warn { display: none; background: #2a2010; border: 1px solid #5c4a1e; border-left: 3px solid #f59e0b;
@@ -2599,7 +2736,16 @@ app.get("/reminders", requireAuth, (req, res) => {
 <div class="card">
   <label>What</label>
   <input type="text" id="title" placeholder="e.g. Call the vet" autocomplete="off">
-  <div class="row">
+  <div style="margin-top:10px">
+    <label>Repeat</label>
+    <select id="repeat" onchange="onRepeatChange()">
+      <option value="none">Once</option>
+      <option value="daily">Daily</option>
+      <option value="weekly">Weekly</option>
+      <option value="monthly">Monthly</option>
+    </select>
+  </div>
+  <div class="row" id="dateRow">
     <div>
       <label>Date</label>
       <input type="date" id="date">
@@ -2609,6 +2755,18 @@ app.get("/reminders", requireAuth, (req, res) => {
       <input type="time" id="time">
     </div>
   </div>
+  <div id="timeOnlyRow" style="margin-top:10px; display:none">
+    <label>Time</label>
+    <input type="time" id="rtime">
+  </div>
+  <div id="weekdayRow" style="margin-top:10px; display:none">
+    <label>Days</label>
+    <div id="weekdays" class="weekdays"></div>
+  </div>
+  <div id="domRow" style="margin-top:10px; display:none">
+    <label>Day of month (1-31)</label>
+    <input type="number" id="dom" min="1" max="31" value="1">
+  </div>
   <div class="warn" id="warn">Under 30 minutes away — open the app after saving so it arms right away.</div>
   <button class="primary" id="addBtn" onclick="addReminder()">Add reminder</button>
 </div>
@@ -2617,6 +2775,12 @@ app.get("/reminders", requireAuth, (req, res) => {
 <table>
   <thead><tr><th>What</th><th>When</th><th></th></tr></thead>
   <tbody id="list"><tr><td colspan="3" class="empty">Loading…</td></tr></tbody>
+</table>
+
+<h2 style="margin-top:22px">Recurring <span class="count" id="rcount"></span></h2>
+<table>
+  <thead><tr><th>What</th><th>Repeats</th><th></th></tr></thead>
+  <tbody id="rlist"><tr><td colspan="3" class="empty">Loading…</td></tr></tbody>
 </table>
 
 <div id="toast"></div>
@@ -2634,6 +2798,80 @@ function toast(msg, ok){
 function pad(n){ return String(n).padStart(2,'0'); }
 
 // Default the form to today and the next round half-hour.
+const WD_NAMES = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+
+// Build the weekday toggle buttons once.
+function buildWeekdays(){
+  const box = document.getElementById('weekdays');
+  box.innerHTML = WD_NAMES.map(function(n,i){
+    return '<div class="wd" data-d="'+i+'">'+n+'</div>';
+  }).join('');
+  box.addEventListener('click', function(e){
+    const el = e.target.closest('.wd');
+    if(el) el.classList.toggle('on');
+  });
+}
+
+function onRepeatChange(){
+  const v = document.getElementById('repeat').value;
+  document.getElementById('dateRow').style.display    = (v === 'none') ? 'flex' : 'none';
+  document.getElementById('timeOnlyRow').style.display= (v === 'none') ? 'none' : 'block';
+  document.getElementById('weekdayRow').style.display = (v === 'weekly') ? 'block' : 'none';
+  document.getElementById('domRow').style.display     = (v === 'monthly') ? 'block' : 'none';
+}
+
+function repeatSummary(r){
+  if(r.type === 'daily') return 'Daily · ' + to12h(r.time_str);
+  if(r.type === 'weekly'){
+    const days = String(r.weekdays||'').split(',').filter(function(s){return s!=='';})
+      .map(function(s){ return WD_NAMES[parseInt(s,10)]; }).join(', ');
+    return 'Weekly · ' + days + ' · ' + to12h(r.time_str);
+  }
+  if(r.type === 'monthly') return 'Monthly · day ' + r.day_of_month + ' · ' + to12h(r.time_str);
+  return '';
+}
+
+function to12h(hhmm){
+  const parts = String(hhmm).split(':').map(Number);
+  let h = parts[0]; const m = pad(parts[1]);
+  const ap = h >= 12 ? 'PM' : 'AM'; h = h % 12; if(h===0) h = 12;
+  return h+':'+m+' '+ap;
+}
+
+async function loadRecurring(){
+  try{
+    const r = await fetch('/api/recurring-reminders');
+    const data = await r.json();
+    const list = data.recurring || [];
+    const tb = document.getElementById('rlist');
+    document.getElementById('rcount').textContent = list.length ? '· ' + list.length : '';
+    if(!list.length){
+      tb.innerHTML = '<tr><td colspan="3" class="empty">No recurring reminders.</td></tr>';
+      return;
+    }
+    tb.innerHTML = list.map(function(r){
+      const safeTitle = String(r.title)
+        .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+      return '<tr>' +
+        '<td>' + safeTitle + '</td>' +
+        '<td class="when">' + repeatSummary(r) + '</td>' +
+        '<td style="text-align:right"><button class="del" onclick="delRecurring(' + r.id + ')">&times;</button></td>' +
+        '</tr>';
+    }).join('');
+  }catch(e){
+    document.getElementById('rlist').innerHTML =
+      '<tr><td colspan="3" class="empty">Could not load recurring.</td></tr>';
+  }
+}
+
+async function delRecurring(id){
+  try{
+    const r = await fetch('/api/recurring-reminders/' + id, { method: 'DELETE' });
+    if(!r.ok) throw new Error('Failed to delete');
+    loadRecurring(); load();
+  }catch(e){ toast(e.message, false); }
+}
+
 function seedDefaults(){
   const now = new Date();
   const d = new Date(now.getTime() + 60*60*1000);
@@ -2651,7 +2889,6 @@ function chosenDate(){
   return new Date(parts[0], parts[1]-1, parts[2], tp[0], tp[1], 0, 0);
 }
 
-// Show the amber warning only when the chosen time is under the lead window.
 function checkLead(){
   const when = chosenDate();
   const warn = document.getElementById('warn');
@@ -2665,7 +2902,6 @@ document.getElementById('date').addEventListener('input', checkLead);
 document.getElementById('time').addEventListener('input', checkLead);
 
 function fmtWhen(s){
-  // s is "YYYY-MM-DD HH:MM:SS" local
   const p = s.split(' ');
   const d = p[0].split('-').map(Number);
   const t = p[1].split(':').map(Number);
@@ -2722,24 +2958,47 @@ async function load(){
 async function addReminder(){
   const btn = document.getElementById('addBtn');
   const title = document.getElementById('title').value.trim();
-  const date = document.getElementById('date').value;
-  const time = document.getElementById('time').value;
+  const repeat = document.getElementById('repeat').value;
   if(!title){ toast('Enter what the reminder is for', false); return; }
-  if(!date || !time){ toast('Pick a date and time', false); return; }
-  const when = chosenDate();
-  if(when && when.getTime() <= Date.now()){ toast('That time has already passed', false); return; }
 
   btn.disabled = true;
   try{
-    const r = await fetch('/api/reminders', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ title: title, date: date, time: time })
-    });
-    const data = await r.json();
-    if(!r.ok) throw new Error(data.error || 'Failed to save');
+    if(repeat === 'none'){
+      const date = document.getElementById('date').value;
+      const time = document.getElementById('time').value;
+      if(!date || !time){ toast('Pick a date and time', false); btn.disabled=false; return; }
+      const when = chosenDate();
+      if(when && when.getTime() <= Date.now()){ toast('That time has already passed', false); btn.disabled=false; return; }
+      const r = await fetch('/api/reminders', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title: title, date: date, time: time })
+      });
+      const data = await r.json();
+      if(!r.ok) throw new Error(data.error || 'Failed to save');
+      toast('Reminder added', true);
+    } else {
+      const time = document.getElementById('rtime').value;
+      if(!time){ toast('Pick a time', false); btn.disabled=false; return; }
+      const payload = { title: title, type: repeat, time: time };
+      if(repeat === 'weekly'){
+        const days = Array.prototype.slice.call(document.querySelectorAll('#weekdays .wd.on'))
+          .map(function(el){ return parseInt(el.getAttribute('data-d'),10); });
+        if(!days.length){ toast('Pick at least one day', false); btn.disabled=false; return; }
+        payload.weekdays = days;
+      }
+      if(repeat === 'monthly'){
+        payload.day_of_month = parseInt(document.getElementById('dom').value,10);
+      }
+      const r = await fetch('/api/recurring-reminders', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      const data = await r.json();
+      if(!r.ok) throw new Error(data.error || 'Failed to save');
+      toast('Recurring reminder added', true);
+      loadRecurring();
+    }
     document.getElementById('title').value = '';
-    toast('Reminder added', true);
     load();
   }catch(e){ toast(e.message, false); }
   finally{ btn.disabled = false; }
@@ -2753,8 +3012,9 @@ async function delReminder(id){
   }catch(e){ toast(e.message, false); }
 }
 
-seedDefaults(); checkLead(); load();
-setInterval(load, 60000);
+buildWeekdays(); onRepeatChange();
+seedDefaults(); checkLead(); load(); loadRecurring();
+setInterval(function(){ load(); loadRecurring(); }, 60000);
 </script>
 </body>
 </html>`;

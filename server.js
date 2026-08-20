@@ -898,7 +898,11 @@ async function buildExerciseMap() {
     for (const ex of (w.exercises || [])) {
       const id = ex.exercise_template_id;
       if (!id) continue;
-      const normalSets = (ex.sets || []).filter(s => s.type === "normal" && s.weight_kg > 0 && s.reps > 0);
+      // Count every WORKING set, not just type "normal". Hevy labels sets taken to
+      // failure as "failure" and drop sets as "dropset" — this program is built on
+      // those, so requiring "normal" discarded ~98% of logged sets and left nearly
+      // every exercise showing "No data yet".
+      const normalSets = (ex.sets || []).filter(s => s.type !== "warmup" && s.weight_kg > 0 && s.reps > 0);
       if (!normalSets.length) continue;
       const bestSet = normalSets.reduce((b, s) =>
         epley1RM(s.weight_kg * KG_TO_LBS, s.reps) > epley1RM(b.weight_kg * KG_TO_LBS, b.reps) ? s : b

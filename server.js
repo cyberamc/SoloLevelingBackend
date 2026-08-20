@@ -84,7 +84,8 @@ app.get("/logout", (req, res) => {
 });
 
 // ─── Hevy Config ──────────────────────────────────────────────────────────────
-const HEVY_API_KEY = "d4b36ead-42d1-4916-9055-3ddb36d123f1";
+// Key lives in .env (HEVY_API_KEY=...) so it is never committed to git.
+const HEVY_API_KEY = process.env.HEVY_API_KEY || "";
 const KG_TO_LBS = 2.20462;
 
 // ─── Player / Level Logic ─────────────────────────────────────────────────────
@@ -221,9 +222,16 @@ function checkAndUpdateStreak() {
 }
 
 function startMidnightScheduler() {
+  // The 00:00 minute lasts 60 ticks, so without a latch this fired the rollover 60
+  // times a night — incrementing or zeroing the streak once per second. Record the
+  // date we last ran and skip if it has already happened today.
+  let lastRunDate = null;
   setInterval(() => {
     const now = new Date();
     if (now.getHours() === 0 && now.getMinutes() === 0) {
+      const today = db.prepare("SELECT date('now','localtime') AS d").get().d;
+      if (lastRunDate === today) return; // already rolled over today
+      lastRunDate = today;
       console.log("Midnight reset triggered at " + now.toISOString());
       checkAndUpdateStreak();
       generateDailyQuests();
@@ -257,6 +265,433 @@ function epley1RM(weightLbs, reps) {
   if (reps === 1) return weightLbs;
   return Math.round(weightLbs * (1 + reps / 30));
 }
+
+// ─── Plateau Analyzer ─────────────────────────────────────────────────────────
+// Scans recent Hevy workouts after each new session and writes suggestions into
+// gym_suggestions, surfaced read-only in the Gym tab. Three signals:
+//   1. e1RM trend flat/negative over the last N sessions for a lift
+//   2. Rep-target miss  — top set failing to clear the block's prescribed top rep
+//   3. Volume / frequency — tonnage well below trailing average, or muscle gone stale
+// Tuning knobs live in PA_CONFIG.
+const PA_CONFIG = {
+  window: 5,          // sessions per lift used for the trend fit
+  flatSlopeLbs: 1.0,  // <= this slope (lbs/session) counts as flat
+  minSessions: 3,     // need at least this many sessions before judging a lift
+  repMissCount: 2,    // this many misses inside the window flags the lift
+  dropPct: 0.20,      // tonnage this far below trailing average flags the group
+  staleDays: 6        // days without training a group before a frequency flag
+};
+
+// Rep targets by block. Value = the TOP of the heaviest (lowest-rep) prescription
+// for that exercise in that block, since the analyzer compares against the top set.
+// Exercises whose reps aren't a load proxy (failure sets, bodyweight lever
+// progressions) are deliberately absent so the rep signal skips them.
+const PA_REP_TARGETS = [
+  { // Block 1 - Weeks 1-4
+    "Chest Press (Machine)": 6,
+    "Chest Press (Cable)": 12,
+    "Lat Pulldown (Machine)": 8,
+    "Single Arm Lat Pulldown (Machine)": 12,
+    "Seated Shoulder Press (Machine)": 10,
+    "Seated Cable Row - V Grip (Cable)": 10,
+    "Overhead Triceps Extension (Cable)": 15,
+    "Bicep Curl (Cable)": 15,
+    "Bayesian Cable Curl": 15,
+    "Triceps Pressdown": 15,
+    "Single Arm Lateral Raise (Cable)": 15,
+    "Face Pull": 12,
+    "Hack Squat (Machine)": 6,
+    "Leg Press (Machine)": 6,
+    "Leg Press Horizontal (Machine)": 6,
+    "Seated Leg Curl (Machine)": 12,
+    "Calf Extension (Machine)": 12,
+    "Leg Extension (Machine)": 12,
+    "Romanian Deadlift (Barbell)": 12,
+    "Romanian Deadlift (Smith Machine)": 12,
+    "Decline Crunch (Weighted)": 15
+  },
+  { // Block 2 - Weeks 5-8 (arms move to 15-20 rep work)
+    "Chest Press (Machine)": 8,
+    "Lat Pulldown (Machine)": 10,
+    "Single Arm Lat Pulldown (Machine)": 12,
+    "Seated Cable Row - V Grip (Cable)": 10,
+    "Seated Row (Machine)": 12,
+    "Seated Shoulder Press (Machine)": 10,
+    "Bicep Curl (Cable)": 20,
+    "Overhead Triceps Extension (Cable)": 20,
+    "Bayesian Cable Curl": 15,
+    "Triceps Pressdown": 15,
+    "Single Arm Lateral Raise (Cable)": 15,
+    "Rear Delt Reverse Fly (Machine)": 15,
+    "Hack Squat (Machine)": 8,
+    "Leg Press (Machine)": 12,
+    "Leg Press Horizontal (Machine)": 12,
+    "Lying Leg Curl (Machine)": 12,
+    "Calf Extension (Machine)": 15,
+    "Leg Extension (Machine)": 15,
+    "Romanian Deadlift (Barbell)": 12,
+    "Romanian Deadlift (Smith Machine)": 12,
+    "Decline Crunch (Weighted)": 12
+  },
+  { // Block 3 - Weeks 9-12
+    "Chest Press (Machine)": 6,
+    "Chest Press (Cable)": 12,
+    "Lat Pulldown (Machine)": 10,
+    "Single Arm Lat Pulldown (Machine)": 12,
+    "Seated Row (Machine)": 12,
+    "Seated Shoulder Press (Machine)": 12,
+    "Overhead Triceps Extension (Cable)": 15,
+    "Bicep Curl (Cable)": 15,
+    "Bayesian Cable Curl": 12,
+    "Triceps Pressdown": 12,
+    "Single Arm Lateral Raise (Cable)": 12,
+    "Rear Delt Reverse Fly (Machine)": 20,
+    "Hack Squat (Machine)": 6,
+    "Leg Press (Machine)": 10,
+    "Leg Press Horizontal (Machine)": 10,
+    "Lying Leg Curl (Machine)": 10,
+    "Calf Extension (Machine)": 12,
+    "Leg Extension (Machine)": 15,
+    "Romanian Deadlift (Barbell)": 12,
+    "Romanian Deadlift (Smith Machine)": 12,
+    "Decline Crunch (Weighted)": 15
+  }
+];
+// Reps aren't a load proxy on these, so the rep-target signal skips them:
+// Dragon Flag, Kneeling Push Up, Push Up - Close Grip.
+
+// Which 4-week block is active right now (0/1/2), from the same rotation start
+// date the Gym tab uses so targets stay in sync with the routines shown.
+function paActiveBlockIndex() {
+  return paBlockInfo().blockIndex;
+}
+
+// Current block index plus the date that block began. Analysis is confined to the
+// current block: each block prescribes different rep ranges and loads (Block 2
+// deliberately drops arm loads for 15-20 rep work), so comparing sessions across
+// a block boundary reads a planned deload as a plateau.
+function paBlockInfo() {
+  const startRow = db.prepare("SELECT start_date FROM gym_rotation WHERE id = 1").get();
+  const startDate = startRow ? startRow.start_date : "2026-07-06";
+  const today = db.prepare("SELECT date('now','localtime') AS d").get().d;
+  const daysElapsed = db.prepare("SELECT CAST(julianday(?) - julianday(?) AS INTEGER) AS n").get(today, startDate).n;
+  const cycleDay = ((daysElapsed % 84) + 84) % 84;
+  const blockIndex = Math.floor(cycleDay / 28);
+  // Days since the current 28-day block started -> that block's first date.
+  const daysIntoBlock = cycleDay % 28;
+  const blockStart = db.prepare("SELECT date(?, '-' || ? || ' days') AS d").get(today, daysIntoBlock).d;
+  return { blockIndex, blockStart, daysIntoBlock };
+}
+
+// Hevy's workout payload does NOT carry primary_muscle_group, so the volume signal
+// needs a title -> muscle map built from /v1/exercise_templates. Cached in memory and
+// refreshed lazily; falls back to "other" for anything unmapped.
+let _paMuscleMap = null;
+async function paMuscleMap() {
+  if (_paMuscleMap) return _paMuscleMap;
+  const map = {};
+  try {
+    for (let page = 1; page <= 10; page++) {
+      const data = await hevyGet("/v1/exercise_templates?page=" + page + "&pageSize=100");
+      const list = data.exercise_templates || [];
+      list.forEach(t => {
+        if (t.title) map[t.title] = t.primary_muscle_group || "other";
+      });
+      if (!data.page_count || page >= data.page_count) break;
+    }
+  } catch (e) {
+    console.error("exercise_templates lookup:", e.message);
+  }
+  _paMuscleMap = map;
+  return map;
+}
+
+// ISO-ish week key (YYYY-Www) so tonnage can be bucketed by week.
+function paWeekKey(dateStr) {
+  const d = new Date(dateStr + "T12:00:00");
+  const day = (d.getDay() + 6) % 7;          // Mon=0
+  d.setDate(d.getDate() - day);              // back to Monday
+  return d.toISOString().slice(0, 10);
+}
+
+function paRepTarget(exerciseTitle, blockIndex) {
+  const table = PA_REP_TARGETS[blockIndex] || {};
+  return table[exerciseTitle] ?? null;
+}
+
+// Least-squares slope of y over evenly spaced sessions. Null if under 2 points.
+function paSlope(values) {
+  const n = values.length;
+  if (n < 2) return null;
+  const meanX = (n - 1) / 2;
+  const meanY = values.reduce((a, b) => a + b, 0) / n;
+  let num = 0, den = 0;
+  values.forEach((y, i) => {
+    num += (i - meanX) * (y - meanY);
+    den += (i - meanX) * (i - meanX);
+  });
+  return den === 0 ? null : num / den;
+}
+
+// Flatten Hevy workouts (newest-first) into per-exercise session series and
+// per-muscle-group tonnage, oldest -> newest. Warmup sets are dropped.
+function paNormalize(workouts, muscleMap) {
+  const bySeries = {};   // exercise title -> [{date, bestE1rm, topReps, topWeight}]
+  const byGroup = {};    // muscle group   -> [{date, tonnage}]
+  const ordered = workouts.slice().sort((a, b) =>
+    new Date(a.start_time) - new Date(b.start_time));
+
+  ordered.forEach(w => {
+    const date = (w.start_time || "").slice(0, 10);
+    const groupTonnage = {};
+    (w.exercises || []).forEach(ex => {
+      const working = (ex.sets || []).filter(s => s.type !== "warmup");
+      if (working.length === 0) return;
+      const title = ex.title;
+      const group = ex.primary_muscle_group || (muscleMap && muscleMap[title]) || "other";
+
+      let best = { e1rm: 0, reps: 0, weight: 0 };
+      let tonnage = 0;
+      working.forEach(s => {
+        const lbs = (s.weight_kg || 0) * KG_TO_LBS;
+        const reps = s.reps || 0;
+        tonnage += lbs * reps;
+        const e = epley1RM(lbs, reps);
+        if (e > best.e1rm) best = { e1rm: e, reps: reps, weight: Math.round(lbs) };
+      });
+
+      if (best.e1rm > 0) {
+        if (!bySeries[title]) bySeries[title] = [];
+        bySeries[title].push({ date, bestE1rm: best.e1rm, topReps: best.reps, topWeight: best.weight });
+      }
+      groupTonnage[group] = (groupTonnage[group] || 0) + tonnage;
+    });
+    Object.keys(groupTonnage).forEach(g => {
+      if (!byGroup[g]) byGroup[g] = [];
+      byGroup[g].push({ date, tonnage: Math.round(groupTonnage[g]) });
+    });
+  });
+  return { bySeries, byGroup };
+}
+
+// Signals 1 and 2 for a single lift.
+function paAnalyzeExercise(title, sessions, blockIndex) {
+  const out = [];
+  const recent = sessions.slice(-PA_CONFIG.window);
+  if (recent.length < PA_CONFIG.minSessions) return out;
+
+  // 1. e1RM trend
+  const slope = paSlope(recent.map(s => s.bestE1rm));
+  if (slope !== null && slope <= PA_CONFIG.flatSlopeLbs) {
+    const negative = slope < 0;
+    out.push({
+      exercise: title,
+      muscle_group: null,
+      signal: "e1rm_flat",
+      severity: negative ? "high" : "medium",
+      detail: "Estimated 1RM " + (negative ? "declining" : "flat") + " over " + recent.length +
+              " sessions (" + slope.toFixed(1) + " lbs/session). Best now ~" +
+              recent[recent.length - 1].bestE1rm + " lbs.",
+      fix: negative
+        ? "Deload ~10% and rebuild for 2-3 sessions, or swap to a variation for a block."
+        : "Add a rep before adding load. If it stays flat 2 more sessions, deload ~10% and rebuild."
+    });
+  }
+
+  // 2. Rep-target miss
+  const target = paRepTarget(title, blockIndex);
+  if (target !== null) {
+    const misses = recent.filter(s => s.topReps < target).length;
+    if (misses >= PA_CONFIG.repMissCount) {
+      const lastReps = recent[recent.length - 1].topReps;
+      const short = target - lastReps;
+      out.push({
+        exercise: title,
+        muscle_group: null,
+        signal: "rep_target_miss",
+        severity: misses >= recent.length ? "high" : "medium",
+        detail: "Top set missed the " + target + "-rep target in " + misses + " of the last " +
+                recent.length + " sessions (last: " + lastReps + " reps).",
+        // Missing by a rep or two is a grind-it-out problem; missing by 3+ means the load
+        // is wrong for this block's rep range, so lighten rather than chase reps.
+        fix: short >= 3
+          ? "You're " + short + " reps short \u2014 the load is too heavy for this block's " +
+            target + "-rep range. Drop ~20-30% and work back up once you're clearing " + target + "."
+          : "Hold the load and chase +1 rep per session until you clear " + target +
+            " on the top set, then add weight."
+      });
+    }
+  }
+  return out;
+}
+
+// Signal 3 for a muscle group.
+function paAnalyzeVolume(group, sessions, todayStr, latestOverall) {
+  const out = [];
+  const freqRef = latestOverall || sessions[sessions.length - 1];
+  if (!freqRef) return out;
+
+  const daysSince = Math.round(
+    (new Date(todayStr + "T12:00:00") - new Date(freqRef.date + "T12:00:00")) / 86400000);
+  if (daysSince > PA_CONFIG.staleDays) {
+    out.push({
+      exercise: null,
+      muscle_group: group,
+      signal: "frequency_gap",
+      severity: daysSince > PA_CONFIG.staleDays * 2 ? "high" : "medium",
+      detail: group + " last trained " + daysSince + " days ago.",
+      fix: "Get " + group + " back into the week. Frequency drives progress more than any single session."
+    });
+  }
+
+  // Volume is judged WEEKLY, not per session: a muscle is hit across different day
+  // types (lats on Upper and Pull, quads on Lower and Legs) with very different
+  // per-session volume by design, so session-to-session comparison is pure noise.
+  // Bodyweight-only sessions contribute 0 tonnage and are excluded so they don't
+  // read as a total drop-off.
+  const weeks = {};
+  sessions.forEach(s => {
+    if (!s.tonnage || s.tonnage <= 0) return; // bodyweight-only, not a volume signal
+    const wk = paWeekKey(s.date);
+    weeks[wk] = (weeks[wk] || 0) + s.tonnage;
+  });
+  // Judge only COMPLETED weeks. The in-progress week is always partial (the training
+  // week runs Mon/Tue/Thu/Fri/Sat), so comparing it against full prior weeks makes
+  // every muscle look like it collapsed. Volume is a weekly metric — evaluate it on a
+  // weekly boundary.
+  const thisWeek = paWeekKey(todayStr);
+  const weekKeys = Object.keys(weeks).sort().filter(k => k !== thisWeek);
+  // Blocks are only 4 weeks long, so demanding a long baseline would mean the signal
+  // never fires. One completed week to judge plus at least one before it is enough.
+  if (weekKeys.length >= 2) {
+    const currentKey = weekKeys[weekKeys.length - 1];
+    const current = weeks[currentKey];
+    const prior = weekKeys.slice(0, -1).map(k => weeks[k]);
+    const avg = prior.reduce((a, b) => a + b, 0) / prior.length;
+    if (avg > 0 && current < avg * (1 - PA_CONFIG.dropPct)) {
+      const pct = Math.round((1 - current / avg) * 100);
+      out.push({
+        exercise: null,
+        muscle_group: group,
+        signal: "volume_drop",
+        severity: pct >= 40 ? "high" : "medium",
+        detail: group + " tonnage for week of " + currentKey + " was " + pct +
+                "% below the trailing average (" + Math.round(current).toLocaleString() +
+                " vs ~" + Math.round(avg).toLocaleString() + " lbs).",
+        fix: "If that wasn't a planned lighter week, check sleep, food, and caffeine timing. " +
+             "Add a set back before adding load."
+      });
+    }
+  }
+  return out;
+}
+
+function initGymSuggestions() {
+  db.prepare(`
+    CREATE TABLE IF NOT EXISTS gym_suggestions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      exercise TEXT,
+      muscle_group TEXT,
+      signal TEXT NOT NULL,
+      severity TEXT NOT NULL,
+      detail TEXT NOT NULL,
+      fix TEXT NOT NULL,
+      workout_id TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+      dismissed INTEGER NOT NULL DEFAULT 0,
+      UNIQUE(signal, exercise, muscle_group, workout_id)
+    )
+  `).run();
+  db.prepare(`
+    CREATE TABLE IF NOT EXISTS hevy_sync (
+      key TEXT PRIMARY KEY,
+      value TEXT
+    )
+  `).run();
+}
+initGymSuggestions();
+
+// Pull recent workouts, analyze, persist. No-ops unless the newest workout id
+// differs from the last one analyzed (or force = true).
+async function runPlateauAnalysis(force) {
+  if (!HEVY_API_KEY) return { skipped: "no HEVY_API_KEY" };
+  const page1 = await hevyGet("/v1/workouts?page=1&pageSize=10");
+  const page2 = await hevyGet("/v1/workouts?page=2&pageSize=10");
+  const workouts = [...(page1.workouts || []), ...(page2.workouts || [])];
+  if (workouts.length === 0) return { skipped: "no workouts" };
+
+  const newestId = String(workouts[0].id);
+  const lastRow = db.prepare("SELECT value FROM hevy_sync WHERE key = 'last_workout_id'").get();
+  if (!force && lastRow && lastRow.value === newestId) {
+    return { skipped: "no new workout", lastWorkoutId: newestId };
+  }
+
+  const { blockIndex, blockStart } = paBlockInfo();
+  const today = db.prepare("SELECT date('now','localtime') AS d").get().d;
+  const muscleMap = await paMuscleMap();
+  const { bySeries, byGroup } = paNormalize(workouts, muscleMap);
+
+  // Confine every signal to the current block (see paBlockInfo).
+  const inBlock = arr => arr.filter(s => s.date >= blockStart);
+
+  const found = [];
+  Object.keys(bySeries).forEach(title => {
+    paAnalyzeExercise(title, inBlock(bySeries[title]), blockIndex).forEach(s => found.push(s));
+  });
+  Object.keys(byGroup).forEach(group => {
+    if (group === "other") return; // unmapped catch-all isn't a meaningful muscle group
+    const sessions = inBlock(byGroup[group]);
+    // Frequency needs the true last-trained date, even if it predates the block.
+    const full = byGroup[group];
+    paAnalyzeVolume(group, sessions, today, full[full.length - 1]).forEach(s => found.push(s));
+  });
+
+  const insert = db.prepare(`
+    INSERT OR IGNORE INTO gym_suggestions
+      (exercise, muscle_group, signal, severity, detail, fix, workout_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `);
+  let written = 0;
+  found.forEach(s => {
+    const info = insert.run(s.exercise, s.muscle_group, s.signal, s.severity, s.detail, s.fix, newestId);
+    if (info.changes > 0) written++;
+  });
+
+  db.prepare("INSERT INTO hevy_sync (key, value) VALUES ('last_workout_id', ?) " +
+             "ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(newestId);
+
+  return { analyzed: workouts.length, blockIndex, blockStart, found: found.length, written, workoutId: newestId };
+}
+
+// Active suggestions, highest severity first. Runs the analysis opportunistically
+// so opening the Gym tab picks up a workout logged since the last check.
+app.get("/api/gym/suggestions", async (req, res) => {
+  try { await runPlateauAnalysis(false); } catch (e) { console.error("Plateau analysis:", e.message); }
+  const rows = db.prepare(`
+    SELECT * FROM gym_suggestions
+    WHERE dismissed = 0
+    ORDER BY CASE severity WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END, created_at DESC
+  `).all();
+  res.json({ suggestions: rows });
+});
+
+app.post("/api/gym/suggestions/:id/dismiss", (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  if (!Number.isFinite(id)) return res.status(400).json({ error: "bad id" });
+  db.prepare("UPDATE gym_suggestions SET dismissed = 1 WHERE id = ?").run(id);
+  res.json({ success: true });
+});
+
+// Manual trigger for testing / tuning: forces a re-analysis of recent workouts.
+app.post("/api/gym/analyze", async (req, res) => {
+  try {
+    const result = await runPlateauAnalysis(true);
+    res.json(result);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 
 // Standards for 35-year-old male at 191 lbs [beginner, novice, intermediate, advanced, elite] in lbs 1RM
 const STRENGTH_STANDARDS = {

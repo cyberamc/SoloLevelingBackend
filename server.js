@@ -915,7 +915,22 @@ async function buildExerciseMap() {
   return { map, workouts };
 }
 
-function buildExerciseStats(id, fallbackTitle, exerciseMap) {
+// Exercise titles the plateau analyzer currently flags (e1RM flat/declining, or
+// missing the block's rep target). This drives the inline "Plateau" badge, replacing
+// the old weight-only check — that one called rep progression (140x10 -> 140x12) a
+// plateau, because the load hadn't changed, and ignored block boundaries.
+function paFlaggedExerciseTitles() {
+  try {
+    const rows = db.prepare(
+      "SELECT DISTINCT exercise FROM gym_suggestions WHERE dismissed = 0 AND exercise IS NOT NULL"
+    ).all();
+    return new Set(rows.map(r => r.exercise));
+  } catch (e) {
+    return new Set();
+  }
+}
+
+function buildExerciseStats(id, fallbackTitle, exerciseMap, flagged) {
   const data = exerciseMap[id];
   const title = (data && data.title) || fallbackTitle;
   if (!data || !data.sessions.length) return {
@@ -941,7 +956,8 @@ function buildExerciseStats(id, fallbackTitle, exerciseMap) {
   return {
     exercise_template_id: id, title,
     session_count: sessions.length, best_weight_lbs: best.weightLbs, best_reps: best.reps,
-    estimated_1rm_lbs: oneRM, is_plateaued: sessionsAtCurrentWeight >= 3,
+    estimated_1rm_lbs: oneRM,
+    is_plateaued: flagged ? flagged.has(title) : (sessionsAtCurrentWeight >= 3),
     sessions_at_current_weight: sessionsAtCurrentWeight, last_pr_date: lastPrDate,
     recent_gain_lbs: sessions.length >= 2 ? sessions[0].weightLbs - sessions[1].weightLbs : 0,
     strength_level: strength ? strength.level : null,
@@ -953,8 +969,9 @@ function buildExerciseStats(id, fallbackTitle, exerciseMap) {
 app.get("/api/gym/summary", async (req, res) => {
   try {
     const { map: exerciseMap } = await buildExerciseMap();
+    const flagged = paFlaggedExerciseTitles();
     const results = Object.keys(exerciseMap)
-      .map(id => buildExerciseStats(id, exerciseMap[id].title, exerciseMap))
+      .map(id => buildExerciseStats(id, exerciseMap[id].title, exerciseMap, flagged))
       .sort((a, b) => b.session_count - a.session_count);
     res.json(results);
   } catch (e) {
@@ -1011,12 +1028,13 @@ app.get("/api/gym/routines", async (req, res) => {
         seen.add(t); return true;
       });
     }
+    const flagged = paFlaggedExerciseTitles();
     const result = filtered
       .map(r => ({
         routine_id: r.id,
         title: r.title,
         exercises: (r.exercises || []).map(ex =>
-          buildExerciseStats(ex.exercise_template_id, ex.title, exerciseMap)
+          buildExerciseStats(ex.exercise_template_id, ex.title, exerciseMap, flagged)
         ),
       }));
     res.json(result);

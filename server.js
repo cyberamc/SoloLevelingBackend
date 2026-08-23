@@ -1309,10 +1309,15 @@ function routineSectionForToday() {
   return (wd === 5 || wd === 6) ? 'delivery' : 'wfm';
 }
 
-// GET /api/routine-reference — returns ONLY today's schedule (WFM or Delivery),
-// with a label. Open (no auth) so the Android app can fetch it without login.
+// GET /api/routine-reference — returns ONE schedule (WFM or Delivery) with a label.
+// Defaults to today's; pass ?weekday=0-6 to get a specific day's section, which the
+// app's Routine screen uses so the reference follows its day picker.
+// Open (no auth) so the Android app can fetch it without login.
 app.get("/api/routine-reference", (req, res) => {
-  const section = routineSectionForToday();
+  const wd = parseInt(req.query.weekday, 10);
+  const section = Number.isFinite(wd) && wd >= 0 && wd <= 6
+    ? ((wd === 5 || wd === 6) ? 'delivery' : 'wfm')
+    : routineSectionForToday();
   const rows = db.prepare("SELECT sort_order, title FROM routine_reference WHERE section = ? ORDER BY sort_order").all(section);
   const label = section === 'delivery' ? 'Delivery Day' : 'WFM';
   res.json({ section, label, items: rows });

@@ -2604,6 +2604,154 @@ buildTabs(); highlightTab(); load();
 // ─── Daily Routine reference page (read-only, protected) ──────────────────────
 // Shows the core everyday routine from routine_reference. Gated with requireAuth
 // to match /routines, /notepad, /bookkeeping, /reminders.
+// ─── Tasks page (browse any weekday; today's are toggleable) ──────────────────
+// Today shows the LIVE generated quests from /api/quests, so ticking a box here is
+// the same action as ticking it in the app (and counts toward the streak). Other
+// weekdays show that day's templates read-only, since their quests don't exist yet.
+app.get("/tasks", requireAuth, (req, res) => {
+  const html = `<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tasks</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #0a0a1a; color: #ddd; font-family: -apple-system, sans-serif; padding: 16px; max-width: 760px; margin: 0 auto; }
+  h1 { color: #fff; font-size: 24px; margin-bottom: 4px; }
+  .subtitle { color: #888; font-size: 13px; margin-bottom: 16px; }
+  .tabs { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 16px; }
+  .tab { background: #12122a; border: 1px solid #2a2a3a; border-radius: 6px; color: #aab;
+         font-size: 13px; padding: 8px 12px; cursor: pointer; font-family: inherit; }
+  .tab.active { background: #2a3a5c; border-color: #4a6cae; color: #cfe0ff; font-weight: 600; }
+  .tab.today { border-color: #FFD700; }
+  .note { background: #12122a; border-left: 3px solid #4a6cae; border-radius: 6px;
+          color: #99a; font-size: 12px; padding: 9px 12px; margin-bottom: 14px; }
+  .section-head { color: #b9b9ff; font-size: 12px; font-weight: 700; letter-spacing: 1px;
+                  text-transform: uppercase; margin: 16px 0 8px; }
+  .card { background: #12122a; border: 1px solid #2a2a3a; border-radius: 8px; overflow: hidden; }
+  .row { display: flex; align-items: center; gap: 12px; padding: 12px 14px;
+         border-bottom: 1px solid #1e1e30; font-size: 15px; }
+  .row:last-child { border-bottom: none; }
+  .row.done .title { color: #667; text-decoration: line-through; }
+  .row input[type=checkbox] { width: 20px; height: 20px; accent-color: #7b8cde; flex: none; cursor: pointer; }
+  .dot { width: 20px; flex: none; color: #444; text-align: center; }
+  .title { flex: 1; color: #cfcfe0; }
+  .time { color: #777; font-size: 13px; flex: none; }
+  .empty { color: #666; font-size: 14px; padding: 14px; }
+  .count { color: #666; font-size: 12px; font-weight: 400; margin-left: 6px; }
+</style>
+</head>
+<body>
+<h1>Tasks</h1>
+<div class="subtitle">Today's tasks can be checked off. Other days are a preview.</div>
+<div class="tabs" id="tabs"></div>
+<div id="note"></div>
+<div id="content"><div class="empty">Loading…</div></div>
+
+<script>
+const DAYS = [["0","Sun"],["1","Mon"],["2","Tue"],["3","Wed"],["4","Thu"],["5","Fri"],["6","Sat"]];
+const TODAY = new Date().getDay();
+let current = TODAY;
+
+function esc(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+function buildTabs(){
+  const t = document.getElementById("tabs");
+  t.innerHTML = "";
+  DAYS.forEach(function(d){
+    const b = document.createElement("button");
+    b.className = "tab" + (String(current)===d[0] ? " active" : "") + (Number(d[0])===TODAY ? " today" : "");
+    b.textContent = d[1] + (Number(d[0])===TODAY ? " •" : "");
+    b.onclick = function(){ current = Number(d[0]); buildTabs(); load(); };
+    t.appendChild(b);
+  });
+}
+
+function rowHtml(item, toggleable){
+  const done = item.completed ? " done" : "";
+  const box = toggleable
+    ? '<input type="checkbox" ' + (item.completed ? 'checked' : '') +
+      ' onchange="toggle(\'' + item.kind + '\',' + item.id + ', this.checked)">'
+    : '<span class="dot">•</span>';
+  const time = item.time ? '<span class="time">' + esc(item.time) + '</span>' : '';
+  return '<div class="row' + done + '">' + box +
+         '<span class="title">' + esc(item.title) + '</span>' + time + '</div>';
+}
+
+// Titles come back as "Task @ 6:15 AM" for generated quests — split for display.
+function splitTitle(t){
+  const m = String(t).match(/^(.*) @ (\d{1,2}:\d{2}\s*[AP]M)$/i);
+  return m ? { title: m[1], time: m[2] } : { title: t, time: null };
+}
+
+async function load(){
+  const content = document.getElementById("content");
+  const note = document.getElementById("note");
+  content.innerHTML = '<div class="empty">Loading…</div>';
+  try {
+    if (current === TODAY) {
+      note.innerHTML = '<div class="note">These are today\'s live tasks — checking one here is the same as checking it in the app.</div>';
+      const r = await fetch('/api/quests');
+      const data = await r.json();
+      const daily = (data.dailyQuests || []).map(function(q){
+        const s = splitTitle(q.title);
+        return { id: q.id, kind: 'daily', title: s.title, time: s.time, completed: q.completed };
+      });
+      const weekly = (data.weeklyQuests || [])
+        .filter(function(q){ return q.weekday === TODAY; })
+        .map(function(q){
+          const s = splitTitle(q.title);
+          return { id: q.id, kind: 'weekly', title: s.title, time: s.time, completed: q.completed };
+        });
+      render(daily, weekly, true);
+    } else {
+      note.innerHTML = '<div class="note">Preview of what generates on this day. Not checkable — only today\'s tasks can be toggled.</div>';
+      const r = await fetch('/api/routine/' + current);
+      const data = await r.json();
+      const daily = (data.daily || []).map(function(t){
+        return { id: t.id, kind: 'daily', title: t.title, time: t.time, completed: 0 };
+      });
+      const req = (data.required || []).map(function(t){
+        return { id: t.id, kind: 'weekly', title: t.title, time: t.time, completed: 0 };
+      });
+      render(daily, req, false);
+    }
+  } catch(e) {
+    content.innerHTML = '<div class="empty">Could not load tasks.</div>';
+  }
+}
+
+function render(daily, required, toggleable){
+  let h = '';
+  h += '<div class="section-head">Daily <span class="count">' + daily.length + '</span></div>';
+  h += '<div class="card">' + (daily.length
+        ? daily.map(function(i){ return rowHtml(i, toggleable); }).join('')
+        : '<div class="empty">Nothing scheduled.</div>') + '</div>';
+  h += '<div class="section-head">Required <span class="count">' + required.length + '</span></div>';
+  h += '<div class="card">' + (required.length
+        ? required.map(function(i){ return rowHtml(i, toggleable); }).join('')
+        : '<div class="empty">Nothing required.</div>') + '</div>';
+  document.getElementById("content").innerHTML = h;
+}
+
+async function toggle(kind, id, checked){
+  const base = kind === 'weekly' ? '/api/weekly-quests/' : '/api/quests/';
+  const action = checked ? 'complete' : 'uncomplete';
+  try {
+    await fetch(base + id + '/' + action, { method: 'POST' });
+    load();
+  } catch(e) { load(); }
+}
+
+buildTabs(); load();
+setInterval(function(){ if (current === TODAY) load(); }, 60000);
+</script>
+</body>
+</html>`;
+  res.send(html);
+});
+
 app.get("/routine", requireAuth, (req, res) => {
   const esc = s => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   const buildList = (section) => {

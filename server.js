@@ -611,6 +611,87 @@ function initGymSuggestions() {
 }
 initGymSuggestions();
 
+// ─── Confidence Meter ─────────────────────────────────────────────────────────
+// A 0-100 meter that rises when an urge is overcome and decays slowly, so it
+// reflects "how I've been doing lately" rather than a lifetime total. Each win is
+// logged with its type (hunger | urge) for the breakdown; the meter itself is one
+// combined value. Tunables:
+const CONF_POINTS_PER_WIN = 5;   // added per logged win
+const CONF_DECAY_PER_DAY  = 1;   // subtracted per elapsed day
+const CONF_MAX            = 100;
+
+function initConfidence() {
+  db.prepare(`
+    CREATE TABLE IF NOT EXISTS confidence_state (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      value REAL NOT NULL DEFAULT 0,
+      last_decay_date TEXT NOT NULL DEFAULT (date('now','localtime'))
+    )
+  `).run();
+  db.prepare(`
+    CREATE TABLE IF NOT EXISTS confidence_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      type TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+    )
+  `).run();
+  if (!db.prepare("SELECT id FROM confidence_state WHERE id = 1").get()) {
+    db.prepare("INSERT INTO confidence_state (id, value) VALUES (1, 0)").run();
+  }
+}
+initConfidence();
+
+// Apply any decay owed since the last time we touched the meter, then return it.
+// Done lazily on read/write so no scheduler is needed.
+function confidenceCurrent() {
+  const row = db.prepare("SELECT value, last_decay_date FROM confidence_state WHERE id = 1").get();
+  const today = db.prepare("SELECT date('now','localtime') AS d").get().d;
+  if (!row) return 0;
+  const days = db.prepare("SELECT CAST(julianday(?) - julianday(?) AS INTEGER) AS n")
+    .get(today, row.last_decay_date).n;
+  if (days > 0) {
+    const decayed = Math.max(0, row.value - days * CONF_DECAY_PER_DAY);
+    db.prepare("UPDATE confidence_state SET value = ?, last_decay_date = ? WHERE id = 1")
+      .run(decayed, today);
+    return decayed;
+  }
+  return row.value;
+}
+
+app.get("/api/confidence", (req, res) => {
+  const value = confidenceCurrent();
+  const counts = db.prepare("SELECT type, COUNT(*) AS n FROM confidence_log GROUP BY type").all();
+  const byType = {};
+  counts.forEach(r => { byType[r.type] = r.n; });
+  res.json({
+    value: Math.round(value),
+    max: CONF_MAX,
+    hunger: byType.hunger || 0,
+    urge: byType.urge || 0,
+    total: (byType.hunger || 0) + (byType.urge || 0)
+  });
+});
+
+// Log a win. body: { type: "hunger" | "urge" }
+app.post("/api/confidence", (req, res) => {
+  const type = (req.body && req.body.type === "hunger") ? "hunger" : "urge";
+  const current = confidenceCurrent();
+  const next = Math.min(CONF_MAX, current + CONF_POINTS_PER_WIN);
+  db.prepare("UPDATE confidence_state SET value = ? WHERE id = 1").run(next);
+  db.prepare("INSERT INTO confidence_log (type) VALUES (?)").run(type);
+  const counts = db.prepare("SELECT type, COUNT(*) AS n FROM confidence_log GROUP BY type").all();
+  const byType = {};
+  counts.forEach(r => { byType[r.type] = r.n; });
+  res.json({
+    value: Math.round(next),
+    max: CONF_MAX,
+    hunger: byType.hunger || 0,
+    urge: byType.urge || 0,
+    total: (byType.hunger || 0) + (byType.urge || 0)
+  });
+});
+
+
 // Pull recent workouts, analyze, persist. No-ops unless the newest workout id
 // differs from the last one analyzed (or force = true).
 async function runPlateauAnalysis(force) {

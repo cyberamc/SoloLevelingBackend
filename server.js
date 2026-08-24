@@ -732,8 +732,21 @@ async function runPlateauAnalysis(force) {
       (exercise, muscle_group, signal, severity, detail, fix, workout_id)
     VALUES (?, ?, ?, ?, ?, ?, ?)
   `);
+  // A suggestion describes the CURRENT state of a lift, not history. Without this,
+  // every analysed workout left another row behind (UNIQUE includes workout_id), so
+  // one stalled lift accumulated an alert per session. Retire older undismissed rows
+  // for the same signal+exercise+group before writing the new one.
+  const supersede = db.prepare(`
+    UPDATE gym_suggestions SET dismissed = 1
+    WHERE dismissed = 0
+      AND signal = ?
+      AND IFNULL(exercise, '') = IFNULL(?, '')
+      AND IFNULL(muscle_group, '') = IFNULL(?, '')
+      AND workout_id IS NOT ?
+  `);
   let written = 0;
   found.forEach(s => {
+    supersede.run(s.signal, s.exercise, s.muscle_group, newestId);
     const info = insert.run(s.exercise, s.muscle_group, s.signal, s.severity, s.detail, s.fix, newestId);
     if (info.changes > 0) written++;
   });
@@ -1011,11 +1024,42 @@ function paFlaggedExerciseTitles() {
   }
 }
 
-function buildExerciseStats(id, fallbackTitle, exerciseMap, flagged) {
+// Active suggestions grouped by exercise title, so each exercise can carry its own
+// alerts inline in the Gym tab instead of them all living in one list at the top.
+function paSuggestionsByExercise() {
+  try {
+    const rows = db.prepare(
+      "SELECT id, exercise, signal, severity, detail, fix FROM gym_suggestions " +
+      "WHERE dismissed = 0 AND exercise IS NOT NULL " +
+      "ORDER BY CASE severity WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END"
+    ).all();
+    const map = {};
+    rows.forEach(r => {
+      if (!map[r.exercise]) map[r.exercise] = [];
+      map[r.exercise].push({
+        id: r.id, signal: r.signal, severity: r.severity, detail: r.detail, fix: r.fix
+      });
+    });
+    return map;
+  } catch (e) {
+    return {};
+  }
+}
+
+// Canonical training-day order for the Gym tab, regardless of Hevy's ordering.
+const GYM_DAY_ORDER = ["upper", "lower", "push", "pull", "legs"];
+function gymDayRank(title) {
+  const t = (title || "").trim().toLowerCase();
+  const i = GYM_DAY_ORDER.findIndex(d => t === d || t.startsWith(d));
+  return i === -1 ? GYM_DAY_ORDER.length : i;
+}
+
+function buildExerciseStats(id, fallbackTitle, exerciseMap, flagged, suggMap) {
   const data = exerciseMap[id];
   const title = (data && data.title) || fallbackTitle;
   if (!data || !data.sessions.length) return {
     exercise_template_id: id, title,
+    suggestions: (suggMap && suggMap[fallbackTitle]) || [],
     session_count: 0, best_weight_lbs: 0, best_reps: 0, estimated_1rm_lbs: 0,
     is_plateaued: false, sessions_at_current_weight: 0, last_pr_date: "",
     recent_gain_lbs: 0, strength_level: null, strength_percentile: null,
@@ -1036,6 +1080,7 @@ function buildExerciseStats(id, fallbackTitle, exerciseMap, flagged) {
   }
   return {
     exercise_template_id: id, title,
+    suggestions: (suggMap && suggMap[title]) || [],
     session_count: sessions.length, best_weight_lbs: best.weightLbs, best_reps: best.reps,
     estimated_1rm_lbs: oneRM,
     is_plateaued: flagged ? flagged.has(title) : (sessionsAtCurrentWeight >= 3),
@@ -1052,7 +1097,7 @@ app.get("/api/gym/summary", async (req, res) => {
     const { map: exerciseMap } = await buildExerciseMap();
     const flagged = paFlaggedExerciseTitles();
     const results = Object.keys(exerciseMap)
-      .map(id => buildExerciseStats(id, exerciseMap[id].title, exerciseMap, flagged))
+      .map(id => buildExerciseStats(id, exerciseMap[id].title, exerciseMap, flagged, paSuggestionsByExercise()))
       .sort((a, b) => b.session_count - a.session_count);
     res.json(results);
   } catch (e) {
@@ -1110,12 +1155,15 @@ app.get("/api/gym/routines", async (req, res) => {
       });
     }
     const flagged = paFlaggedExerciseTitles();
+    const suggMap = paSuggestionsByExercise();
     const result = filtered
+      .slice()
+      .sort((a, b) => gymDayRank(a.title) - gymDayRank(b.title))
       .map(r => ({
         routine_id: r.id,
         title: r.title,
         exercises: (r.exercises || []).map(ex =>
-          buildExerciseStats(ex.exercise_template_id, ex.title, exerciseMap, flagged)
+          buildExerciseStats(ex.exercise_template_id, ex.title, exerciseMap, flagged, suggMap)
         ),
       }));
     res.json(result);
@@ -1128,20 +1176,36 @@ app.get("/api/gym/routines", async (req, res) => {
 app.get("/api/gym/history/:exerciseId", async (req, res) => {
   try {
     const data = await hevyGet("/v1/exercise_history/" + req.params.exerciseId + "?page=1&pageSize=10");
-    const history = (data.exercise_history || []).map(entry => {
-      const sets = (entry.sets || []).filter(s => s.weight_kg > 0 && s.reps > 0);
-      if (!sets.length) return null;
-      const best = sets.reduce((b, s) =>
-        epley1RM(s.weight_kg * KG_TO_LBS, s.reps) > epley1RM(b.weight_kg * KG_TO_LBS, b.reps) ? s : b
-      );
-      const weightLbs = Math.round(best.weight_kg * KG_TO_LBS);
-      return {
-        date: entry.workout_date || "",
-        weight_lbs: weightLbs,
-        reps: best.reps,
-        estimated_1rm_lbs: epley1RM(weightLbs, best.reps),
-      };
-    }).filter(Boolean);
+    // Hevy returns a FLAT list of individual SETS (workout_id, workout_start_time,
+    // weight_kg, reps, set_type) — not workouts containing a sets array. Group by
+    // workout, then take that session's best working set.
+    const byWorkout = {};
+    (data.exercise_history || []).forEach(s => {
+      if (s.set_type === "warmup") return;
+      if (!(s.weight_kg > 0) || !(s.reps > 0)) return;
+      const id = s.workout_id || s.workout_start_time || "";
+      if (!byWorkout[id]) {
+        byWorkout[id] = { date: (s.workout_start_time || "").slice(0, 10), best: null };
+      }
+      const e = epley1RM(s.weight_kg * KG_TO_LBS, s.reps);
+      const cur = byWorkout[id].best;
+      if (!cur || e > cur.e1rm) {
+        byWorkout[id].best = { e1rm: e, weight_kg: s.weight_kg, reps: s.reps };
+      }
+    });
+    const history = Object.values(byWorkout)
+      .filter(w => w.best)
+      .map(w => {
+        const weightLbs = Math.round(w.best.weight_kg * KG_TO_LBS);
+        return {
+          date: w.date,
+          weight_lbs: weightLbs,
+          reps: w.best.reps,
+          estimated_1rm_lbs: epley1RM(weightLbs, w.best.reps),
+        };
+      })
+      // Oldest -> newest so the "max weight over time" chart reads left to right.
+      .sort((a, b) => a.date.localeCompare(b.date));
     res.json(history);
   } catch (e) {
     console.error("Hevy /history error:", e.message);
@@ -2672,7 +2736,7 @@ function rowHtml(item, toggleable){
   const done = item.completed ? " done" : "";
   const box = toggleable
     ? '<input type="checkbox" ' + (item.completed ? 'checked' : '') +
-      ' onchange="toggle(\'' + item.kind + '\',' + item.id + ', this.checked)">'
+      ' data-kind="' + item.kind + '" data-id="' + item.id + '">'
     : '<span class="dot">•</span>';
   const time = item.time ? '<span class="time">' + esc(item.time) + '</span>' : '';
   return '<div class="row' + done + '">' + box +
@@ -2681,7 +2745,7 @@ function rowHtml(item, toggleable){
 
 // Titles come back as "Task @ 6:15 AM" for generated quests — split for display.
 function splitTitle(t){
-  const m = String(t).match(/^(.*) @ (\d{1,2}:\d{2}\s*[AP]M)$/i);
+  const m = String(t).match(/^(.*) @ (\\d{1,2}:\\d{2}\\s*[AP]M)$/i);
   return m ? { title: m[1], time: m[2] } : { title: t, time: null };
 }
 
@@ -2691,7 +2755,7 @@ async function load(){
   content.innerHTML = '<div class="empty">Loading…</div>';
   try {
     if (current === TODAY) {
-      note.innerHTML = '<div class="note">These are today\'s live tasks — checking one here is the same as checking it in the app.</div>';
+      note.innerHTML = '<div class="note">These are today&#39;s live tasks — checking one here is the same as checking it in the app.</div>';
       const r = await fetch('/api/quests');
       const data = await r.json();
       const daily = (data.dailyQuests || []).map(function(q){
@@ -2706,7 +2770,7 @@ async function load(){
         });
       render(daily, weekly, true);
     } else {
-      note.innerHTML = '<div class="note">Preview of what generates on this day. Not checkable — only today\'s tasks can be toggled.</div>';
+      note.innerHTML = '<div class="note">Preview of what generates on this day. Not checkable — only today&#39;s tasks can be toggled.</div>';
       const r = await fetch('/api/routine/' + current);
       const data = await r.json();
       const daily = (data.daily || []).map(function(t){
@@ -2732,7 +2796,13 @@ function render(daily, required, toggleable){
   h += '<div class="card">' + (required.length
         ? required.map(function(i){ return rowHtml(i, toggleable); }).join('')
         : '<div class="empty">Nothing required.</div>') + '</div>';
-  document.getElementById("content").innerHTML = h;
+  const content = document.getElementById("content");
+  content.innerHTML = h;
+  content.querySelectorAll('input[type=checkbox]').forEach(function(cb){
+    cb.addEventListener('change', function(){
+      toggle(cb.getAttribute('data-kind'), cb.getAttribute('data-id'), cb.checked);
+    });
+  });
 }
 
 async function toggle(kind, id, checked){

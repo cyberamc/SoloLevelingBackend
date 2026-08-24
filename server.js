@@ -1159,13 +1159,35 @@ app.get("/api/gym/routines", async (req, res) => {
     const result = filtered
       .slice()
       .sort((a, b) => gymDayRank(a.title) - gymDayRank(b.title))
-      .map(r => ({
-        routine_id: r.id,
-        title: r.title,
-        exercises: (r.exercises || []).map(ex =>
-          buildExerciseStats(ex.exercise_template_id, ex.title, exerciseMap, flagged, suggMap)
-        ),
-      }));
+      .map(r => {
+        const exList = r.exercises || [];
+        // A lift can occupy two slots in one routine (heavy + back-off). Hevy stores
+        // both under the same title, so the analyzer sees ONE lift and produces ONE
+        // alert — attach it to the first slot only, noting it covers both, instead of
+        // repeating it and implying two separate problems.
+        const counts = {};
+        exList.forEach(ex => { counts[ex.title] = (counts[ex.title] || 0) + 1; });
+        const used = new Set();
+        return {
+          routine_id: r.id,
+          title: r.title,
+          exercises: exList.map(ex => {
+            const first = !used.has(ex.title);
+            used.add(ex.title);
+            const stats = buildExerciseStats(
+              ex.exercise_template_id, ex.title, exerciseMap, flagged,
+              first ? suggMap : null
+            );
+            if (first && counts[ex.title] > 1 && stats.suggestions.length) {
+              stats.suggestions = stats.suggestions.map(s => ({
+                ...s,
+                fix: s.fix + " Covers both slots — deloading the heavy set drops the back-off proportionally."
+              }));
+            }
+            return stats;
+          }),
+        };
+      });
     res.json(result);
   } catch (e) {
     console.error("Hevy /routines error:", e.message);

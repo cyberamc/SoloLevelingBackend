@@ -1241,13 +1241,23 @@ app.get("/api/gym/rotation", (req, res) => {
   const row = db.prepare("SELECT start_date FROM gym_rotation WHERE id = 1").get();
   const startDate = row ? row.start_date : null;
   let block = null, daysElapsed = null;
+  let weekInBlock = null, dayInBlock = null, daysLeftInBlock = null, blockStart = null, blockEnd = null;
   if (startDate) {
     const today = db.prepare("SELECT date('now','localtime') AS d").get().d;
     daysElapsed = db.prepare("SELECT CAST(julianday(?) - julianday(?) AS INTEGER) AS n").get(today, startDate).n;
     const cycleDay = ((daysElapsed % 84) + 84) % 84;
-    block = Math.floor(cycleDay / 28) + 1; // 1, 2, or 3
+    block = Math.floor(cycleDay / 28) + 1;      // 1, 2, or 3
+    const daysIntoBlock = cycleDay % 28;        // 0-27
+    dayInBlock = daysIntoBlock + 1;             // 1-28
+    weekInBlock = Math.floor(daysIntoBlock / 7) + 1; // 1-4
+    daysLeftInBlock = 28 - dayInBlock;          // days remaining after today
+    blockStart = db.prepare("SELECT date(?, '-' || ? || ' days') AS d").get(today, daysIntoBlock).d;
+    blockEnd = db.prepare("SELECT date(?, '+' || ? || ' days') AS d").get(blockStart, 27).d;
   }
-  res.json({ startDate, daysElapsed, block });
+  res.json({
+    startDate, daysElapsed, block,
+    weekInBlock, dayInBlock, daysLeftInBlock, blockStart, blockEnd
+  });
 });
 
 // POST reset: restart the rotation. Body { start_date } optional; defaults to today.

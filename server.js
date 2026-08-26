@@ -996,13 +996,21 @@ async function buildExerciseMap() {
       // failure as "failure" and drop sets as "dropset" — this program is built on
       // those, so requiring "normal" discarded ~98% of logged sets and left nearly
       // every exercise showing "No data yet".
-      const normalSets = (ex.sets || []).filter(s => s.type !== "warmup" && s.weight_kg > 0 && s.reps > 0);
+      // Keep every working set with reps, INCLUDING unweighted ones. Bodyweight work
+      // (Dragon Flag, Kneeling Push Up) logs weight_kg = 0; requiring weight > 0 threw
+      // those sessions away entirely, so those lifts showed as never performed. Their
+      // progression is reps (and lever length), so they're tracked by reps instead.
+      const normalSets = (ex.sets || []).filter(s => s.type !== "warmup" && s.reps > 0);
       if (!normalSets.length) continue;
-      const bestSet = normalSets.reduce((b, s) =>
-        epley1RM(s.weight_kg * KG_TO_LBS, s.reps) > epley1RM(b.weight_kg * KG_TO_LBS, b.reps) ? s : b
-      );
-      const weightLbs = Math.round(bestSet.weight_kg * KG_TO_LBS);
-      if (!map[id]) map[id] = { title: ex.title, sessions: [] };
+      const bodyweight = normalSets.every(s => !(s.weight_kg > 0));
+      const bestSet = bodyweight
+        ? normalSets.reduce((b, s) => (s.reps > b.reps ? s : b))
+        : normalSets.reduce((b, s) =>
+            epley1RM(s.weight_kg * KG_TO_LBS, s.reps) > epley1RM(b.weight_kg * KG_TO_LBS, b.reps) ? s : b
+          );
+      const weightLbs = Math.round((bestSet.weight_kg || 0) * KG_TO_LBS);
+      if (!map[id]) map[id] = { title: ex.title, sessions: [], bodyweight: bodyweight };
+      if (!bodyweight) map[id].bodyweight = false;
       map[id].sessions.push({ date, weightLbs, reps: bestSet.reps });
     }
   }
@@ -1060,6 +1068,7 @@ function buildExerciseStats(id, fallbackTitle, exerciseMap, flagged, suggMap) {
   if (!data || !data.sessions.length) return {
     exercise_template_id: id, title,
     suggestions: (suggMap && suggMap[fallbackTitle]) || [],
+    is_bodyweight: false,
     session_count: 0, best_weight_lbs: 0, best_reps: 0, estimated_1rm_lbs: 0,
     is_plateaued: false, sessions_at_current_weight: 0, last_pr_date: "",
     recent_gain_lbs: 0, strength_level: null, strength_percentile: null,
@@ -1081,6 +1090,7 @@ function buildExerciseStats(id, fallbackTitle, exerciseMap, flagged, suggMap) {
   return {
     exercise_template_id: id, title,
     suggestions: (suggMap && suggMap[title]) || [],
+    is_bodyweight: !!entry.bodyweight,
     session_count: sessions.length, best_weight_lbs: best.weightLbs, best_reps: best.reps,
     estimated_1rm_lbs: oneRM,
     is_plateaued: flagged ? flagged.has(title) : (sessionsAtCurrentWeight >= 3),
@@ -1204,15 +1214,18 @@ app.get("/api/gym/history/:exerciseId", async (req, res) => {
     const byWorkout = {};
     (data.exercise_history || []).forEach(s => {
       if (s.set_type === "warmup") return;
-      if (!(s.weight_kg > 0) || !(s.reps > 0)) return;
+      if (!(s.reps > 0)) return;   // unweighted bodyweight sets still count
       const id = s.workout_id || s.workout_start_time || "";
       if (!byWorkout[id]) {
         byWorkout[id] = { date: (s.workout_start_time || "").slice(0, 10), best: null };
       }
-      const e = epley1RM(s.weight_kg * KG_TO_LBS, s.reps);
+      const kg = s.weight_kg || 0;
+      // Unweighted sets compare by reps; weighted ones by estimated 1RM.
+      const e = kg > 0 ? epley1RM(kg * KG_TO_LBS, s.reps) : 0;
       const cur = byWorkout[id].best;
-      if (!cur || e > cur.e1rm) {
-        byWorkout[id].best = { e1rm: e, weight_kg: s.weight_kg, reps: s.reps };
+      const better = !cur || (kg > 0 ? e > cur.e1rm : s.reps > cur.reps);
+      if (better) {
+        byWorkout[id].best = { e1rm: e, weight_kg: kg, reps: s.reps };
       }
     });
     const history = Object.values(byWorkout)
@@ -2849,6 +2862,77 @@ async function toggle(kind, id, checked){
 buildTabs(); load();
 setInterval(function(){ if (current === TODAY) load(); }, 60000);
 </script>
+</body>
+</html>`;
+  res.send(html);
+});
+
+// ─── Urge card (mirror of the app screen behind the streak long-press) ────────
+// Static content, no client-side JS: the HTML is assembled server-side from these
+// arrays and interpolated, so apostrophes in the copy need no escaping.
+const URGE_STEPS_WEB = [
+  "Feet on the pad. 2 mph. Now. Don't negotiate, just start walking.",
+  "The urge is a cue, not a command. It's your body flagging idle + alone. Answer it with motion.",
+  "10 minutes minimum. The wave passes. It always passes.",
+  "Two wins, one move. Steps banked. Loop broken. Same pad, both jobs."
+];
+
+const URGE_REASONS_WEB = [
+  ["The urge is temporary — you're not.",
+   "It peaks and passes within minutes if you don't feed it. Riding it out proves you're in control, not the impulse."],
+  ["It drains the drive you're building things with.",
+   "You're stacking real projects — the homelab, the SYSTEM app, CCNA. That focus and momentum is the same energy. Redirecting it is fuel, not deprivation."],
+  ["Nothing changes for the better afterward.",
+   "The problem you were avoiding is still there, plus the low, foggy, slightly-ashamed feeling that follows. You never once finish and think &quot;glad I did that.&quot;"],
+  ["It reinforces the exact loop you're trying to break.",
+   "Every time you give in, you teach your brain that discomfort = escape. Every time you don't, you weaken that wiring and get stronger."],
+  ["You're training discipline, and it transfers.",
+   "The person who can say no here is the same person who shows up for workouts, studies when tired, and follows through on the route. This is rep one."],
+  ["Future-you is watching.",
+   "The version of you a month clean doesn't want you to reset the counter over five minutes of impulse. Don't rob him of the streak he earned."],
+  ["Act, don't wait.",
+   "You already know the moves — get up, cold water, walk, push-ups, leave the room. The urge can't survive you standing up and changing your state."]
+];
+
+app.get("/urge", requireAuth, (req, res) => {
+  const steps = URGE_STEPS_WEB.map((s, i) =>
+    '<div class="step"><span class="num">' + (i + 1) + '</span><span>' + s + '</span></div>'
+  ).join("");
+  const reasons = URGE_REASONS_WEB.map(r =>
+    '<div class="reason"><div class="head">' + r[0] + '</div><div class="body">' + r[1] + '</div></div>'
+  ).join("");
+  const html = `<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>When The Urge Hits</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #0a0a0a; color: #ddd; font-family: -apple-system, sans-serif;
+         padding: 18px; max-width: 700px; margin: 0 auto; }
+  h1 { color: #fff; font-size: 26px; }
+  .sub { color: #FFD700; font-size: 14px; font-weight: 700; letter-spacing: 2px;
+         margin: 4px 0 18px; }
+  .step { background: #1a1a1a; border-radius: 10px; padding: 14px; margin-bottom: 10px;
+          display: flex; gap: 12px; font-size: 15px; color: #ddd; line-height: 22px; }
+  .num { color: #FFD700; font-weight: 700; flex: none; }
+  .note { background: #141414; border-radius: 10px; padding: 14px; margin-bottom: 22px;
+          color: #999; font-size: 14px; line-height: 21px; }
+  .sec { color: #FFD700; font-size: 12px; font-weight: 700; letter-spacing: 2px;
+         margin-bottom: 8px; }
+  .reason { background: #1a1a1a; border-radius: 10px; padding: 14px; margin-bottom: 10px; }
+  .reason .head { color: #ddd; font-size: 14px; font-weight: 700; line-height: 20px; }
+  .reason .body { color: #999; font-size: 13px; line-height: 19px; margin-top: 4px; }
+</style>
+</head>
+<body>
+<h1>When The Urge Hits</h1>
+<div class="sub">STAND UP &rarr; PAD</div>
+${steps}
+<div class="note">If you're not near the pad: leave the room. Change what you're looking at. Then come back to the pad.</div>
+<div class="sec">REASONS TO PULL UP</div>
+${reasons}
 </body>
 </html>`;
   res.send(html);

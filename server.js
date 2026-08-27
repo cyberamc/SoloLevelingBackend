@@ -1071,6 +1071,7 @@ function buildExerciseStats(id, fallbackTitle, exerciseMap, flagged, suggMap) {
     is_bodyweight: false,
     session_count: 0, best_weight_lbs: 0, best_reps: 0, estimated_1rm_lbs: 0,
     is_plateaued: false, sessions_at_current_weight: 0, last_pr_date: "",
+    stuck_at_weight_lbs: 0, stuck_at_reps: 0,
     recent_gain_lbs: 0, strength_level: null, strength_percentile: null,
   };
   const { sessions } = data;
@@ -1081,17 +1082,24 @@ function buildExerciseStats(id, fallbackTitle, exerciseMap, flagged, suggMap) {
     : sessions.reduce((b, s) => (s.weightLbs > b.weightLbs ? s : b));
   const oneRM = epley1RM(best.weightLbs, best.reps);
   const strength = getStrengthInfo(title, oneRM);
-  const metric = s => (isBodyweight ? s.reps : s.weightLbs);
-  const currentMax = metric(sessions[0]);
-  let sessionsAtCurrentWeight = 0;
-  for (const s of sessions) {
-    if (metric(s) >= currentMax) sessionsAtCurrentWeight++;
-    else break;
+  // "Stuck" = sessions since the last personal record, measured by estimated 1RM so
+  // rep progress counts (175x6 -> 175x8 is progress even though the load didn't move).
+  // Bodyweight lifts have no load, so they're judged on reps.
+  // The old version compared every session against the MOST RECENT weight and counted
+  // anything >=, so a single light day made the whole history look "stuck".
+  const metric = s => (isBodyweight ? s.reps : epley1RM(s.weightLbs, s.reps));
+  // sessions[0] is the newest (Hevy returns workouts newest-first).
+  let bestSoFar = -Infinity;
+  let prIndex = 0;              // index of the session holding the all-time best
+  for (let i = sessions.length - 1; i >= 0; i--) {   // walk oldest -> newest
+    const v = metric(sessions[i]);
+    if (v > bestSoFar) { bestSoFar = v; prIndex = i; }
   }
-  let lastPrDate = sessions[0].date;
-  for (let i = 0; i < sessions.length - 1; i++) {
-    if (sessions[i].weightLbs > sessions[i + 1].weightLbs) { lastPrDate = sessions[i].date; break; }
-  }
+  // Sessions logged after that PR (prIndex is newest-first, so it IS the count).
+  const sessionsAtCurrentWeight = prIndex;
+  const lastPrDate = sessions[prIndex].date;
+  const stuckAtWeightLbs = sessions[prIndex].weightLbs;
+  const stuckAtReps = sessions[prIndex].reps;
   return {
     exercise_template_id: id, title,
     suggestions: (suggMap && suggMap[title]) || [],
@@ -1100,6 +1108,7 @@ function buildExerciseStats(id, fallbackTitle, exerciseMap, flagged, suggMap) {
     estimated_1rm_lbs: oneRM,
     is_plateaued: flagged ? flagged.has(title) : (sessionsAtCurrentWeight >= 3),
     sessions_at_current_weight: sessionsAtCurrentWeight, last_pr_date: lastPrDate,
+    stuck_at_weight_lbs: stuckAtWeightLbs, stuck_at_reps: stuckAtReps,
     recent_gain_lbs: sessions.length >= 2 ? sessions[0].weightLbs - sessions[1].weightLbs : 0,
     strength_level: strength ? strength.level : null,
     strength_percentile: strength ? strength.percentile : null,

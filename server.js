@@ -1074,13 +1074,18 @@ function buildExerciseStats(id, fallbackTitle, exerciseMap, flagged, suggMap) {
     recent_gain_lbs: 0, strength_level: null, strength_percentile: null,
   };
   const { sessions } = data;
-  const best = sessions.reduce((b, s) => s.weightLbs > b.weightLbs ? s : b);
+  const isBodyweight = !!data.bodyweight;
+  // Bodyweight lifts have no load, so "best" is most reps rather than most weight.
+  const best = isBodyweight
+    ? sessions.reduce((b, s) => (s.reps > b.reps ? s : b))
+    : sessions.reduce((b, s) => (s.weightLbs > b.weightLbs ? s : b));
   const oneRM = epley1RM(best.weightLbs, best.reps);
   const strength = getStrengthInfo(title, oneRM);
-  const currentMax = sessions[0].weightLbs;
+  const metric = s => (isBodyweight ? s.reps : s.weightLbs);
+  const currentMax = metric(sessions[0]);
   let sessionsAtCurrentWeight = 0;
   for (const s of sessions) {
-    if (s.weightLbs >= currentMax) sessionsAtCurrentWeight++;
+    if (metric(s) >= currentMax) sessionsAtCurrentWeight++;
     else break;
   }
   let lastPrDate = sessions[0].date;
@@ -1090,7 +1095,7 @@ function buildExerciseStats(id, fallbackTitle, exerciseMap, flagged, suggMap) {
   return {
     exercise_template_id: id, title,
     suggestions: (suggMap && suggMap[title]) || [],
-    is_bodyweight: !!entry.bodyweight,
+    is_bodyweight: isBodyweight,
     session_count: sessions.length, best_weight_lbs: best.weightLbs, best_reps: best.reps,
     estimated_1rm_lbs: oneRM,
     is_plateaued: flagged ? flagged.has(title) : (sessionsAtCurrentWeight >= 3),

@@ -1244,8 +1244,9 @@ app.get("/api/gym/history/:exerciseId", async (req, res) => {
           estimated_1rm_lbs: epley1RM(weightLbs, w.best.reps),
         };
       })
-      // Oldest -> newest so the "max weight over time" chart reads left to right.
-      .sort((a, b) => a.date.localeCompare(b.date));
+      // Newest first: the Recent-sessions list renders this order directly, and the
+      // chart reverses it internally so it still reads left-to-right chronologically.
+      .sort((a, b) => b.date.localeCompare(a.date));
     res.json(history);
   } catch (e) {
     console.error("Hevy /history error:", e.message);

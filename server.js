@@ -998,6 +998,13 @@ function initGymPRs() {
       updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
     )
   `).run();
+  // best_reps is the all-time rep record, which is the only meaningful PR for
+  // bodyweight movements (Kneeling Push Up is 1 x failure; Dragon Flag progresses by
+  // lever stage, tracked by naming each stage as its own exercise in Hevy).
+  const cols = db.prepare("PRAGMA table_info(gym_prs)").all().map(x => x.name);
+  if (!cols.includes('best_reps')) {
+    db.prepare("ALTER TABLE gym_prs ADD COLUMN best_reps INTEGER NOT NULL DEFAULT 0").run();
+  }
 }
 initGymPRs();
 
@@ -1010,18 +1017,19 @@ function updateGymPR(title, weightLbs, reps) {
   const row = db.prepare("SELECT * FROM gym_prs WHERE exercise = ?").get(title);
   if (!row) {
     db.prepare(`INSERT INTO gym_prs
-      (exercise, heaviest_weight_lbs, best_1rm_lbs, best_set_volume, best_set_weight_lbs, best_set_reps)
-      VALUES (?, ?, ?, ?, ?, ?)`).run(title, w, e1rm, vol, w, reps);
+      (exercise, heaviest_weight_lbs, best_1rm_lbs, best_set_volume, best_set_weight_lbs, best_set_reps, best_reps)
+      VALUES (?, ?, ?, ?, ?, ?, ?)`).run(title, w, e1rm, vol, w, reps, reps);
     return;
   }
   const heaviest = Math.max(row.heaviest_weight_lbs, w);
   const best1rm = Math.max(row.best_1rm_lbs, e1rm);
   let volume = row.best_set_volume, volW = row.best_set_weight_lbs, volR = row.best_set_reps;
   if (vol > volume) { volume = vol; volW = w; volR = reps; }
+  const bestReps = Math.max(row.best_reps || 0, reps);
   db.prepare(`UPDATE gym_prs SET heaviest_weight_lbs = ?, best_1rm_lbs = ?,
-    best_set_volume = ?, best_set_weight_lbs = ?, best_set_reps = ?,
+    best_set_volume = ?, best_set_weight_lbs = ?, best_set_reps = ?, best_reps = ?,
     updated_at = datetime('now','localtime') WHERE exercise = ?`)
-    .run(heaviest, best1rm, volume, volW, volR, title);
+    .run(heaviest, best1rm, volume, volW, volR, bestReps, title);
 }
 
 function getGymPR(title) {
@@ -1334,11 +1342,13 @@ app.post("/api/gym/prs", (req, res) => {
   const best1rm = Math.round(b.best_1rm_lbs || 0);
   const volW = Math.round(b.best_set_weight_lbs || 0);
   const volR = Math.round(b.best_set_reps || 0);
+  const bestReps = Math.round(b.best_reps || 0);
   const vol = volW * volR;
   db.prepare(`INSERT INTO gym_prs
-      (exercise, heaviest_weight_lbs, best_1rm_lbs, best_set_volume, best_set_weight_lbs, best_set_reps)
-      VALUES (?, ?, ?, ?, ?, ?)
+      (exercise, heaviest_weight_lbs, best_1rm_lbs, best_set_volume, best_set_weight_lbs, best_set_reps, best_reps)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(exercise) DO UPDATE SET
+      best_reps           = MAX(best_reps, excluded.best_reps),
       heaviest_weight_lbs = MAX(heaviest_weight_lbs, excluded.heaviest_weight_lbs),
       best_1rm_lbs        = MAX(best_1rm_lbs, excluded.best_1rm_lbs),
       best_set_volume     = MAX(best_set_volume, excluded.best_set_volume),
@@ -1347,7 +1357,7 @@ app.post("/api/gym/prs", (req, res) => {
       best_set_reps       = CASE WHEN excluded.best_set_volume > best_set_volume
                                  THEN excluded.best_set_reps ELSE best_set_reps END,
       updated_at = datetime('now','localtime')
-  `).run(title, heaviest, best1rm, vol, volW, volR);
+  `).run(title, heaviest, best1rm, vol, volW, volR, bestReps);
   res.json({ success: true, pr: getGymPR(title) });
 });
 

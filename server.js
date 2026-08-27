@@ -980,6 +980,54 @@ app.post("/api/weekly-quests/:id/uncomplete", (req, res) => {
 });
 
 // ─── Gym Helpers ──────────────────────────────────────────────────────────────
+// ─── All-time PRs ─────────────────────────────────────────────────────────────
+// Hevy computes PRs from your complete log, but /v1/exercise_history returns only a
+// fixed recent window (pagination is ignored by the API), so we can't recompute the
+// true all-time values on demand. Instead we keep our own running maximums, updated
+// from every set we can see and never decreasing. Seed once from Hevy's numbers and
+// it stays correct from then on.
+function initGymPRs() {
+  db.prepare(`
+    CREATE TABLE IF NOT EXISTS gym_prs (
+      exercise TEXT PRIMARY KEY,
+      heaviest_weight_lbs INTEGER NOT NULL DEFAULT 0,
+      best_1rm_lbs INTEGER NOT NULL DEFAULT 0,
+      best_set_volume INTEGER NOT NULL DEFAULT 0,
+      best_set_weight_lbs INTEGER NOT NULL DEFAULT 0,
+      best_set_reps INTEGER NOT NULL DEFAULT 0,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+    )
+  `).run();
+}
+initGymPRs();
+
+// Merge a candidate PR set for one exercise, keeping the larger of each metric.
+function updateGymPR(title, weightLbs, reps) {
+  if (!title || !(reps > 0)) return;
+  const w = Math.round(weightLbs || 0);
+  const e1rm = w > 0 ? epley1RM(w, reps) : 0;
+  const vol = w * reps;
+  const row = db.prepare("SELECT * FROM gym_prs WHERE exercise = ?").get(title);
+  if (!row) {
+    db.prepare(`INSERT INTO gym_prs
+      (exercise, heaviest_weight_lbs, best_1rm_lbs, best_set_volume, best_set_weight_lbs, best_set_reps)
+      VALUES (?, ?, ?, ?, ?, ?)`).run(title, w, e1rm, vol, w, reps);
+    return;
+  }
+  const heaviest = Math.max(row.heaviest_weight_lbs, w);
+  const best1rm = Math.max(row.best_1rm_lbs, e1rm);
+  let volume = row.best_set_volume, volW = row.best_set_weight_lbs, volR = row.best_set_reps;
+  if (vol > volume) { volume = vol; volW = w; volR = reps; }
+  db.prepare(`UPDATE gym_prs SET heaviest_weight_lbs = ?, best_1rm_lbs = ?,
+    best_set_volume = ?, best_set_weight_lbs = ?, best_set_reps = ?,
+    updated_at = datetime('now','localtime') WHERE exercise = ?`)
+    .run(heaviest, best1rm, volume, volW, volR, title);
+}
+
+function getGymPR(title) {
+  return db.prepare("SELECT * FROM gym_prs WHERE exercise = ?").get(title) || null;
+}
+
 async function buildExerciseMap() {
   const [p1, p2] = await Promise.all([
     hevyGet("/v1/workouts?page=1&pageSize=10"),
@@ -1002,6 +1050,8 @@ async function buildExerciseMap() {
       // progression is reps (and lever length), so they're tracked by reps instead.
       const normalSets = (ex.sets || []).filter(s => s.type !== "warmup" && s.reps > 0);
       if (!normalSets.length) continue;
+      // Every working set is a PR candidate.
+      normalSets.forEach(s => updateGymPR(ex.title, (s.weight_kg || 0) * KG_TO_LBS, s.reps));
       const bodyweight = normalSets.every(s => !(s.weight_kg > 0));
       const bestSet = bodyweight
         ? normalSets.reduce((b, s) => (s.reps > b.reps ? s : b))
@@ -1069,6 +1119,7 @@ function buildExerciseStats(id, fallbackTitle, exerciseMap, flagged, suggMap) {
     exercise_template_id: id, title,
     suggestions: (suggMap && suggMap[fallbackTitle]) || [],
     is_bodyweight: false,
+    prs: getGymPR(fallbackTitle),
     session_count: 0, best_weight_lbs: 0, best_reps: 0, estimated_1rm_lbs: 0,
     is_plateaued: false, sessions_at_current_weight: 0, last_pr_date: "",
     stuck_at_weight_lbs: 0, stuck_at_reps: 0,
@@ -1076,10 +1127,14 @@ function buildExerciseStats(id, fallbackTitle, exerciseMap, flagged, suggMap) {
   };
   const { sessions } = data;
   const isBodyweight = !!data.bodyweight;
-  // Bodyweight lifts have no load, so "best" is most reps rather than most weight.
+  // "Best" is judged by estimated 1RM, not raw weight. Comparing weight alone meant
+  // that when every session used the same load, nothing was ever strictly greater and
+  // the reduce kept the FIRST (newest) entry — so 25x6 beat 25x15. Bodyweight lifts
+  // have no load, so they're judged on reps.
   const best = isBodyweight
     ? sessions.reduce((b, s) => (s.reps > b.reps ? s : b))
-    : sessions.reduce((b, s) => (s.weightLbs > b.weightLbs ? s : b));
+    : sessions.reduce((b, s) =>
+        epley1RM(s.weightLbs, s.reps) > epley1RM(b.weightLbs, b.reps) ? s : b);
   const oneRM = epley1RM(best.weightLbs, best.reps);
   const strength = getStrengthInfo(title, oneRM);
   // "Stuck" = sessions since the last personal record, measured by estimated 1RM so
@@ -1104,6 +1159,7 @@ function buildExerciseStats(id, fallbackTitle, exerciseMap, flagged, suggMap) {
     exercise_template_id: id, title,
     suggestions: (suggMap && suggMap[title]) || [],
     is_bodyweight: isBodyweight,
+    prs: getGymPR(title),
     session_count: sessions.length, best_weight_lbs: best.weightLbs, best_reps: best.reps,
     estimated_1rm_lbs: oneRM,
     is_plateaued: flagged ? flagged.has(title) : (sessionsAtCurrentWeight >= 3),
@@ -1222,6 +1278,8 @@ app.get("/api/gym/routines", async (req, res) => {
 app.get("/api/gym/history/:exerciseId", async (req, res) => {
   try {
     const data = await hevyGet("/v1/exercise_history/" + req.params.exerciseId + "?page=1&pageSize=10");
+    // Title lookup so history sets can feed the PR tracker (the API omits it per-set).
+    const exTitle = (req.query.title || "").trim() || null;
     // Hevy returns a FLAT list of individual SETS (workout_id, workout_start_time,
     // weight_kg, reps, set_type) — not workouts containing a sets array. Group by
     // workout, then take that session's best working set.
@@ -1229,6 +1287,7 @@ app.get("/api/gym/history/:exerciseId", async (req, res) => {
     (data.exercise_history || []).forEach(s => {
       if (s.set_type === "warmup") return;
       if (!(s.reps > 0)) return;   // unweighted bodyweight sets still count
+      updateGymPR(exTitle, (s.weight_kg || 0) * KG_TO_LBS, s.reps);
       const id = s.workout_id || s.workout_start_time || "";
       if (!byWorkout[id]) {
         byWorkout[id] = { date: (s.workout_start_time || "").slice(0, 10), best: null };
@@ -1256,7 +1315,7 @@ app.get("/api/gym/history/:exerciseId", async (req, res) => {
       // Newest first: the Recent-sessions list renders this order directly, and the
       // chart reverses it internally so it still reads left-to-right chronologically.
       .sort((a, b) => b.date.localeCompare(a.date));
-    res.json(history);
+    res.json({ sessions: history, prs: exTitle ? getGymPR(exTitle) : null });
   } catch (e) {
     console.error("Hevy /history error:", e.message);
     res.status(500).json({ error: e.message });
@@ -1265,6 +1324,37 @@ app.get("/api/gym/history/:exerciseId", async (req, res) => {
 
 // ─── Gym rotation control ──────────────────────────────────────────────────────
 // GET current rotation start date + which block is active today.
+// Seed or correct an all-time PR by hand (from Hevy's own numbers).
+// body: { exercise, heaviest_weight_lbs, best_1rm_lbs, best_set_weight_lbs, best_set_reps }
+app.post("/api/gym/prs", (req, res) => {
+  const b = req.body || {};
+  const title = (b.exercise || "").trim();
+  if (!title) return res.status(400).json({ error: "exercise required" });
+  const heaviest = Math.round(b.heaviest_weight_lbs || 0);
+  const best1rm = Math.round(b.best_1rm_lbs || 0);
+  const volW = Math.round(b.best_set_weight_lbs || 0);
+  const volR = Math.round(b.best_set_reps || 0);
+  const vol = volW * volR;
+  db.prepare(`INSERT INTO gym_prs
+      (exercise, heaviest_weight_lbs, best_1rm_lbs, best_set_volume, best_set_weight_lbs, best_set_reps)
+      VALUES (?, ?, ?, ?, ?, ?)
+    ON CONFLICT(exercise) DO UPDATE SET
+      heaviest_weight_lbs = MAX(heaviest_weight_lbs, excluded.heaviest_weight_lbs),
+      best_1rm_lbs        = MAX(best_1rm_lbs, excluded.best_1rm_lbs),
+      best_set_volume     = MAX(best_set_volume, excluded.best_set_volume),
+      best_set_weight_lbs = CASE WHEN excluded.best_set_volume > best_set_volume
+                                 THEN excluded.best_set_weight_lbs ELSE best_set_weight_lbs END,
+      best_set_reps       = CASE WHEN excluded.best_set_volume > best_set_volume
+                                 THEN excluded.best_set_reps ELSE best_set_reps END,
+      updated_at = datetime('now','localtime')
+  `).run(title, heaviest, best1rm, vol, volW, volR);
+  res.json({ success: true, pr: getGymPR(title) });
+});
+
+app.get("/api/gym/prs", (req, res) => {
+  res.json(db.prepare("SELECT * FROM gym_prs ORDER BY exercise").all());
+});
+
 app.get("/api/gym/rotation", (req, res) => {
   const row = db.prepare("SELECT start_date FROM gym_rotation WHERE id = 1").get();
   const startDate = row ? row.start_date : null;

@@ -1440,13 +1440,41 @@ function initStudyPlan() {
     rows.forEach(r => ins.run(r[0], r[1], r[2], r[3]));
     console.log("study_plan seeded with " + rows.length + " days");
   }
+  // Week 1 Day 1. Study days are Sun-Thu, so each week's day N is start + (week-1)*7 + (day-1).
+  db.prepare(`
+    CREATE TABLE IF NOT EXISTS study_plan_meta (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      start_date TEXT NOT NULL
+    )
+  `).run();
+  if (!db.prepare("SELECT id FROM study_plan_meta WHERE id = 1").get()) {
+    db.prepare("INSERT INTO study_plan_meta (id, start_date) VALUES (1, '2026-08-30')").run();
+  }
 }
 initStudyPlan();
 
 app.get("/api/study-plan", (req, res) => {
-  const rows = db.prepare("SELECT * FROM study_plan ORDER BY week, day").all();
+  const meta = db.prepare("SELECT start_date FROM study_plan_meta WHERE id = 1").get();
+  const start = meta ? meta.start_date : "2026-08-30";
+  const today = db.prepare("SELECT date('now','localtime') AS d").get().d;
+  const offset = db.prepare("SELECT date(?, '+' || ? || ' days') AS d");
+  const rows = db.prepare("SELECT * FROM study_plan ORDER BY week, day").all()
+    .map(r => {
+      const n = (r.week - 1) * 7 + (r.day - 1);
+      const date = offset.get(start, n).d;
+      return Object.assign({}, r, { date, is_today: date === today ? 1 : 0 });
+    });
   const done = rows.filter(r => r.done).length;
-  res.json({ days: rows, total: rows.length, done });
+  const examDate = rows.length ? rows[rows.length - 1].date : null;
+  res.json({ days: rows, total: rows.length, done, start_date: start, exam_date: examDate, today });
+});
+
+// Shift the whole plan by setting a new week 1 day 1. body: { start_date: "YYYY-MM-DD" }
+app.post("/api/study-plan/start", (req, res) => {
+  const sd = (req.body && req.body.start_date) || "";
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(sd)) return res.status(400).json({ error: "start_date must be YYYY-MM-DD" });
+  db.prepare("UPDATE study_plan_meta SET start_date = ? WHERE id = 1").run(sd);
+  res.json({ success: true, start_date: sd });
 });
 
 app.patch("/api/study-plan/:id", (req, res) => {
@@ -3176,6 +3204,11 @@ app.get("/study", requireAuth, (req, res) => {
   .t { color: #cfcfe0; font-size: 15px; }
   .d { color: #7a7a8c; font-size: 12px; margin-top: 2px; }
   .dn { color: #555; font-size: 11px; flex: none; }
+  .dt { color: #6a6a7c; font-size: 11px; flex: none; width: 54px; }
+  .row.today { background: #16203a; }
+  .row.today .dt { color: #FFD700; font-weight: 700; }
+  .wk { color: #6a6a7c; font-weight: 400; text-transform: none; letter-spacing: 0; }
+  .exam { color: #FFD700; font-size: 12px; font-weight: 700; margin-bottom: 16px; }
 </style>
 </head>
 <body>
@@ -3183,10 +3216,16 @@ app.get("/study", requireAuth, (req, res) => {
 <div class="sub">10 weeks &middot; 5 days a week (Sun&ndash;Thu) &middot; ~75 min a day</div>
 <div class="bar"><div class="fill" id="fill"></div></div>
 <div class="prog" id="prog">&nbsp;</div>
+<div class="exam" id="exam">&nbsp;</div>
 <div id="content"></div>
 
 <script>
 function esc(s){ return String(s == null ? "" : s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
+var MON = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+var DOW = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
+function parseD(s){ var p = String(s).split("-").map(Number); return new Date(p[0], p[1]-1, p[2]); }
+function fmtShort(s){ var d = parseD(s); return MON[d.getMonth()] + " " + d.getDate(); }
+function fmtLong(s){ var d = parseD(s); return DOW[d.getDay()] + ", " + MON[d.getMonth()] + " " + d.getDate() + ", " + d.getFullYear(); }
 
 async function load(){
   const r = await fetch("/api/study-plan");
@@ -3195,6 +3234,9 @@ async function load(){
   const pct = data.total ? Math.round((data.done / data.total) * 100) : 0;
   document.getElementById("fill").style.width = pct + "%";
   document.getElementById("prog").textContent = data.done + " of " + data.total + " days complete (" + pct + "%)";
+  if (data.exam_date) {
+    document.getElementById("exam").textContent = "Exam day: " + fmtLong(data.exam_date);
+  }
 
   const byWeek = {};
   days.forEach(function(d){ (byWeek[d.week] = byWeek[d.week] || []).push(d); });
@@ -3207,10 +3249,15 @@ async function load(){
     if (w === "9") label += " &mdash; review";
     if (w === "10") label += " &mdash; exam";
     if (allDone) label += " &check;";
+    const range = items.length
+      ? ' <span class="wk">' + fmtShort(items[0].date) + " &ndash; " + fmtShort(items[items.length-1].date) + "</span>"
+      : "";
+    label += range;
     h += '<h2>' + label + '</h2><div class="card">';
     items.forEach(function(i){
-      h += '<div class="row' + (i.done ? ' done' : '') + '">' +
+      h += '<div class="row' + (i.done ? ' done' : '') + (i.is_today ? ' today' : '') + '">' +
            '<input type="checkbox" data-id="' + i.id + '"' + (i.done ? ' checked' : '') + '>' +
+           '<span class="dt">' + fmtShort(i.date) + '</span>' +
            '<span class="txt"><div class="t">' + esc(i.title) + '</div>' +
            (i.detail ? '<div class="d">' + esc(i.detail) + '</div>' : '') + '</span>' +
            (i.done_at ? '<span class="dn">' + esc(i.done_at) + '</span>' : '') +

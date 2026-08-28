@@ -1365,6 +1365,99 @@ app.get("/api/gym/prs", (req, res) => {
   res.json(db.prepare("SELECT * FROM gym_prs ORDER BY exercise").all());
 });
 
+
+// ─── CCNA study plan ──────────────────────────────────────────────────────────
+// 10 weeks x 5 WFM days (Sun-Thu). Sections 1-4 and 40 were already done before
+// this plan starts. Weeks 1-8 are new content, week 9 is review, week 10 is exam
+// prep and the exam itself. Edit rows in study_plan to adjust.
+function initStudyPlan() {
+  db.prepare(`
+    CREATE TABLE IF NOT EXISTS study_plan (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      week INTEGER NOT NULL,
+      day INTEGER NOT NULL,
+      title TEXT NOT NULL,
+      detail TEXT,
+      done INTEGER NOT NULL DEFAULT 0,
+      done_at TEXT
+    )
+  `).run();
+  const count = db.prepare("SELECT COUNT(*) AS c FROM study_plan").get().c;
+  if (count === 0) {
+    const rows = [
+    [1, 1, "Sections 5 & 6", "70 min + lab exercises"],
+    [1, 2, "Section 7", "~60 min"],
+    [1, 3, "Section 8", "~60 min"],
+    [1, 4, "Sections 9, 10 & 11", "50 min + labs"],
+    [1, 5, "Section 12", "60 min + labs"],
+    [2, 1, "Sections 13 & 14", "75 min + labs"],
+    [2, 2, "Section 15", "50 min + labs"],
+    [2, 3, "Section 16", "65 min + labs"],
+    [2, 4, "Section 17 (1/2)", "~70 min"],
+    [2, 5, "Section 17 (2/2)", "~70 min"],
+    [3, 1, "Section 17 labs", "Complete all Section 17 lab exercises"],
+    [3, 2, "Sections 18 & 19", "65 min + labs"],
+    [3, 3, "Section 20 (1/2)", "~75 min"],
+    [3, 4, "Section 20 (2/2)", "~75 min + labs"],
+    [3, 5, "Section 21", "95 min"],
+    [4, 1, "Sections 22 & 23", "75 min + labs"],
+    [4, 2, "Section 24", "40 min + labs"],
+    [4, 3, "Section 25 (1/3)", "~70 min"],
+    [4, 4, "Section 25 (2/3)", "~70 min"],
+    [4, 5, "Section 25 (3/3)", "~60 min + labs"],
+    [5, 1, "Section 26", "55 min + labs"],
+    [5, 2, "Section 27", "55 min + labs"],
+    [5, 3, "Section 28", "70 min + labs"],
+    [5, 4, "Section 29", "75 min + labs"],
+    [5, 5, "Section 30 (1/2)", "~55 min"],
+    [6, 1, "Section 30 (2/2)", "~50 min + labs"],
+    [6, 2, "Section 31", "60 min"],
+    [6, 3, "Section 32 (1/2)", "~60 min"],
+    [6, 4, "Section 32 (2/2)", "~60 min"],
+    [6, 5, "Section 33", "90 min + labs"],
+    [7, 1, "Section 34", "65 min + labs"],
+    [7, 2, "Section 35", "60 min"],
+    [7, 3, "Section 36 (1/2)", "~45 min"],
+    [7, 4, "Section 36 (2/2)", "~45 min"],
+    [7, 5, "Section 37", "95 min"],
+    [8, 1, "Section 38 (1/3)", "~60 min"],
+    [8, 2, "Section 38 (2/3)", "~55 min"],
+    [8, 3, "Section 38 (3/3)", "~55 min"],
+    [8, 4, "Section 39", "80 min"],
+    [8, 5, "Anki consolidation", "Catch up all decks, re-drill weak cards"],
+    [9, 1, "Review: network fundamentals", "Sections 1-12 + Anki"],
+    [9, 2, "Review: switching & VLANs", "Re-run key labs"],
+    [9, 3, "Review: routing & OSPF", "Re-run key labs"],
+    [9, 4, "Review: security & wireless", "Anki + notes"],
+    [9, 5, "Review: IP services & automation", "Anki + notes"],
+    [10, 1, "Practice exam #1", "Full length, timed"],
+    [10, 2, "Review weak areas", "From practice exam #1"],
+    [10, 3, "Practice exam #2", "Full length, timed"],
+    [10, 4, "Light review + rest", "No cramming"],
+    [10, 5, "EXAM DAY", "Crush it"]
+    ];
+    const ins = db.prepare("INSERT INTO study_plan (week, day, title, detail) VALUES (?, ?, ?, ?)");
+    rows.forEach(r => ins.run(r[0], r[1], r[2], r[3]));
+    console.log("study_plan seeded with " + rows.length + " days");
+  }
+}
+initStudyPlan();
+
+app.get("/api/study-plan", (req, res) => {
+  const rows = db.prepare("SELECT * FROM study_plan ORDER BY week, day").all();
+  const done = rows.filter(r => r.done).length;
+  res.json({ days: rows, total: rows.length, done });
+});
+
+app.patch("/api/study-plan/:id", (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  if (!Number.isFinite(id)) return res.status(400).json({ error: "bad id" });
+  const done = req.body && req.body.done ? 1 : 0;
+  db.prepare("UPDATE study_plan SET done = ?, done_at = CASE WHEN ? = 1 THEN date('now','localtime') ELSE NULL END WHERE id = ?")
+    .run(done, done, id);
+  res.json({ success: true });
+});
+
 app.get("/api/gym/rotation", (req, res) => {
   const row = db.prepare("SELECT start_date FROM gym_rotation WHERE id = 1").get();
   const startDate = row ? row.start_date : null;
@@ -3048,6 +3141,103 @@ ${steps}
 <div class="note">If you're not near the pad: leave the room. Change what you're looking at. Then come back to the pad.</div>
 <div class="sec">REASONS TO PULL UP</div>
 ${reasons}
+</body>
+</html>`;
+  res.send(html);
+});
+
+// ─── CCNA study plan page ─────────────────────────────────────────────────────
+app.get("/study", requireAuth, (req, res) => {
+  const html = `<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CCNA Study Plan</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #0a0a1a; color: #ddd; font-family: -apple-system, sans-serif;
+         padding: 16px; max-width: 780px; margin: 0 auto; }
+  h1 { color: #fff; font-size: 24px; }
+  .sub { color: #888; font-size: 13px; margin-bottom: 14px; }
+  .bar { height: 8px; background: #1e1e30; border-radius: 4px; overflow: hidden; margin-bottom: 6px; }
+  .fill { height: 8px; background: #FFD700; width: 0%; }
+  .prog { color: #FFD700; font-size: 12px; font-weight: 700; margin-bottom: 18px; }
+  h2 { color: #b9b9ff; font-size: 12px; font-weight: 700; letter-spacing: 1px;
+       text-transform: uppercase; margin: 18px 0 8px; }
+  .card { background: #12122a; border: 1px solid #2a2a3a; border-radius: 8px; overflow: hidden; }
+  .row { display: flex; align-items: center; gap: 12px; padding: 11px 14px;
+         border-bottom: 1px solid #1e1e30; }
+  .row:last-child { border-bottom: none; }
+  .row.done .t { color: #667; text-decoration: line-through; }
+  .row.done .d { color: #555; }
+  .row input { width: 19px; height: 19px; accent-color: #7b8cde; flex: none; cursor: pointer; }
+  .txt { flex: 1; }
+  .t { color: #cfcfe0; font-size: 15px; }
+  .d { color: #7a7a8c; font-size: 12px; margin-top: 2px; }
+  .dn { color: #555; font-size: 11px; flex: none; }
+</style>
+</head>
+<body>
+<h1>CCNA Study Plan</h1>
+<div class="sub">10 weeks &middot; 5 days a week (Sun&ndash;Thu) &middot; ~75 min a day</div>
+<div class="bar"><div class="fill" id="fill"></div></div>
+<div class="prog" id="prog">&nbsp;</div>
+<div id="content"></div>
+
+<script>
+function esc(s){ return String(s == null ? "" : s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
+
+async function load(){
+  const r = await fetch("/api/study-plan");
+  const data = await r.json();
+  const days = data.days || [];
+  const pct = data.total ? Math.round((data.done / data.total) * 100) : 0;
+  document.getElementById("fill").style.width = pct + "%";
+  document.getElementById("prog").textContent = data.done + " of " + data.total + " days complete (" + pct + "%)";
+
+  const byWeek = {};
+  days.forEach(function(d){ (byWeek[d.week] = byWeek[d.week] || []).push(d); });
+
+  let h = "";
+  Object.keys(byWeek).sort(function(a,b){ return a - b; }).forEach(function(w){
+    const items = byWeek[w];
+    const allDone = items.every(function(i){ return i.done; });
+    let label = "Week " + w;
+    if (w === "9") label += " &mdash; review";
+    if (w === "10") label += " &mdash; exam";
+    if (allDone) label += " &check;";
+    h += '<h2>' + label + '</h2><div class="card">';
+    items.forEach(function(i){
+      h += '<div class="row' + (i.done ? ' done' : '') + '">' +
+           '<input type="checkbox" data-id="' + i.id + '"' + (i.done ? ' checked' : '') + '>' +
+           '<span class="txt"><div class="t">' + esc(i.title) + '</div>' +
+           (i.detail ? '<div class="d">' + esc(i.detail) + '</div>' : '') + '</span>' +
+           (i.done_at ? '<span class="dn">' + esc(i.done_at) + '</span>' : '') +
+           '</div>';
+    });
+    h += '</div>';
+  });
+  const content = document.getElementById("content");
+  content.innerHTML = h;
+  content.querySelectorAll('input[type=checkbox]').forEach(function(cb){
+    cb.addEventListener("change", function(){ toggle(cb.getAttribute('data-id'), cb.checked); });
+  });
+}
+
+async function toggle(id, done){
+  try {
+    await fetch("/api/study-plan/" + id, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ done: done })
+    });
+  } catch(e) {}
+  load();
+}
+
+load();
+</script>
 </body>
 </html>`;
   res.send(html);

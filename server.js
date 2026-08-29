@@ -1722,7 +1722,7 @@ function initRoutineReference() {
       "6:25 PM - Walk Toby & Turn On Lights"
     ];
     let idx = 0;
-    wfm.forEach(title => insert.run(idx++, title, 'wfm'));
+    wfm.forEach(title => insert.run(idx++, title, 'gym'));
     delivery.forEach(title => insert.run(idx++, title, 'delivery'));
     console.log("routine_reference seeded: " + wfm.length + " wfm + " + delivery.length + " delivery");
   }
@@ -1730,10 +1730,23 @@ function initRoutineReference() {
 initRoutineReference();
 
 // Today's routine section: WFM = Sun-Thu (weekday 0-4), Delivery = Fri/Sat (5-6).
-function routineSectionForToday() {
-  const wd = new Date().getDay(); // 0=Sun..6=Sat, local time
-  return (wd === 5 || wd === 6) ? 'delivery' : 'wfm';
+// Sun(0) & Wed(3) are rest days (plasma, no gym); Mon(1), Tue(2), Thu(4) are gym
+// days; Fri(5) & Sat(6) are delivery days.
+function routineSectionForWeekday(wd) {
+  if (wd === 5 || wd === 6) return 'delivery';
+  if (wd === 0 || wd === 3) return 'rest';
+  return 'gym';
 }
+
+function routineSectionForToday() {
+  return routineSectionForWeekday(new Date().getDay());
+}
+
+const ROUTINE_SECTION_LABELS = {
+  gym: 'Gym Day',
+  rest: 'Rest Day',
+  delivery: 'Delivery Day'
+};
 
 // GET /api/routine-reference — returns ONE schedule (WFM or Delivery) with a label.
 // Defaults to today's; pass ?weekday=0-6 to get a specific day's section, which the
@@ -1742,10 +1755,10 @@ function routineSectionForToday() {
 app.get("/api/routine-reference", (req, res) => {
   const wd = parseInt(req.query.weekday, 10);
   const section = Number.isFinite(wd) && wd >= 0 && wd <= 6
-    ? ((wd === 5 || wd === 6) ? 'delivery' : 'wfm')
+    ? routineSectionForWeekday(wd)
     : routineSectionForToday();
   const rows = db.prepare("SELECT sort_order, title FROM routine_reference WHERE section = ? ORDER BY sort_order").all(section);
-  const label = section === 'delivery' ? 'Delivery Day' : 'WFM';
+  const label = ROUTINE_SECTION_LABELS[section] || section;
   res.json({ section, label, items: rows });
 });
 
@@ -3296,7 +3309,8 @@ app.get("/routine", requireAuth, (req, res) => {
     const rows = db.prepare("SELECT title FROM routine_reference WHERE section = ? ORDER BY sort_order").all(section);
     return rows.map(r => `<li>${esc(r.title)}</li>`).join("");
   };
-  const wfmItems = buildList('wfm');
+  const gymItems = buildList('gym');
+  const restItems = buildList('rest');
   const deliveryItems = buildList('delivery');
   const html = `<!DOCTYPE html>
 <html>
@@ -3306,7 +3320,7 @@ app.get("/routine", requireAuth, (req, res) => {
 <title>Daily Routine</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { background: #0a0a1a; color: #ddd; font-family: -apple-system, sans-serif; padding: 16px; max-width: 1000px; margin: 0 auto; }
+  body { background: #0a0a1a; color: #ddd; font-family: -apple-system, sans-serif; padding: 16px; max-width: 1300px; margin: 0 auto; }
   h1 { color: #fff; font-size: 24px; margin-bottom: 4px; }
   .subtitle { color: #888; font-size: 13px; margin-bottom: 18px; }
   .columns { display: flex; gap: 16px; align-items: flex-start; }
@@ -3317,7 +3331,7 @@ app.get("/routine", requireAuth, (req, res) => {
   li { counter-increment: item; padding: 11px 14px; border-bottom: 1px solid #1e1e30; font-size: 15px; color: #cfcfe0; display: flex; align-items: baseline; }
   li:last-child { border-bottom: none; }
   li::before { content: counter(item); color: #555; font-size: 12px; width: 26px; flex: none; }
-  @media (max-width: 640px) { .columns { flex-direction: column; } }
+  @media (max-width: 900px) { .columns { flex-direction: column; } }
 </style>
 </head>
 <body>
@@ -3325,8 +3339,12 @@ app.get("/routine", requireAuth, (req, res) => {
 <div class="subtitle">Both schedules. Reference only.</div>
 <div class="columns">
   <div class="column">
-    <div class="col-head">WFM (Sun-Thu)</div>
-    <div class="card"><ol>${wfmItems}</ol></div>
+    <div class="col-head">Gym (Mon/Tue/Thu)</div>
+    <div class="card"><ol>${gymItems}</ol></div>
+  </div>
+  <div class="column">
+    <div class="col-head">Rest (Sun/Wed)</div>
+    <div class="card"><ol>${restItems}</ol></div>
   </div>
   <div class="column">
     <div class="col-head">Delivery (Fri/Sat)</div>

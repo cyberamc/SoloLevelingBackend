@@ -2472,7 +2472,24 @@ function speedxByCheckForMonth(monthId) {
 // Lists the current bookkeeping month's checks (one per delivery week, month_id =
 // current month) with amount, pay date, and a per-check "paid" toggle.
 app.get("/api/speedx-checks", (req, res) => {
-  const month = db.prepare("SELECT * FROM bookkeeping_months ORDER BY month DESC LIMIT 1").get();
+  // Show the month we're actually IN, not the newest row that happens to exist.
+  // Bookkeeping months are often created ahead of time, so ORDER BY month DESC
+  // jumped to September while the last August check was still pending.
+  // ?month=YYYY-MM overrides; otherwise today's month, falling back to the latest
+  // row that isn't in the future.
+  const today = db.prepare("SELECT date('now','localtime') AS d").get().d;
+  const currentYm = today.slice(0, 7);
+  const wanted = (req.query.month || "").trim();
+  let month = null;
+  if (/^\d{4}-\d{2}$/.test(wanted)) {
+    month = db.prepare("SELECT * FROM bookkeeping_months WHERE month = ?").get(wanted);
+  }
+  if (!month) {
+    month = db.prepare("SELECT * FROM bookkeeping_months WHERE month = ?").get(currentYm);
+  }
+  if (!month) {
+    month = db.prepare("SELECT * FROM bookkeeping_months WHERE month <= ? ORDER BY month DESC LIMIT 1").get(currentYm);
+  }
   if (!month) return res.json({ month: null, checks: [] });
   generateDeliveryWeeksForMonth(month.id, month.month);
   const weeks = db.prepare("SELECT * FROM delivery_weeks WHERE month_id = ? ORDER BY check_number").all(month.id);

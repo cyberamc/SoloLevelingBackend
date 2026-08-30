@@ -3152,6 +3152,8 @@ const URGE_REASONS_WEB = [
    "The problem you were avoiding is still there, plus the low, foggy, slightly-ashamed feeling that follows. You never once finish and think &quot;glad I did that.&quot;"],
   ["It reinforces the exact loop you're trying to break.",
    "Every time you give in, you teach your brain that discomfort = escape. Every time you don't, you weaken that wiring and get stronger."],
+  ["It never stops at one.",
+   "Inviting it in once always turns into inviting it again — and it ends with $60 gone and nothing actually changed. You already know it's wrong, and you already know it costs you every time."],
   ["You're training discipline, and it transfers.",
    "The person who can say no here is the same person who shows up for workouts, studies when tired, and follows through on the route. This is rep one."],
   ["Future-you is watching.",

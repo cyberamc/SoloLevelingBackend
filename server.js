@@ -1900,7 +1900,12 @@ app.get("/api/bookkeeping/:monthId", (req, res) => {
     groups[b.group_name].push(b);
   });
 
-  res.json({ month, bills, groups, speedxTotal, speedxByCheck: speedxChecks, incomeLabels: GROUP_INCOME_LABELS, fixedIncome: FIXED_INCOME });
+  const payDates = Object.assign(
+    {},
+    itCheckDatesForMonth(month.month),
+    speedxPayDatesForMonth(month.id)
+  );
+  res.json({ month, bills, groups, speedxTotal, speedxByCheck: speedxChecks, incomeLabels: GROUP_INCOME_LABELS, fixedIncome: FIXED_INCOME, payDates });
 });
 
 // Ensure a bookkeeping month exists for the current calendar month (by today's date).
@@ -2058,6 +2063,14 @@ app.get("/bookkeeping", requireAuth, (req, res) => {
   // Ensure this month's delivery weeks exist, then compute SpeedX from them
   generateDeliveryWeeksForMonth(currentMonth.id, currentMonth.month);
   const speedxChecks = speedxByCheckForMonth(currentMonth.id);
+  const payDates = Object.assign({}, itCheckDatesForMonth(currentMonth.month), speedxPayDatesForMonth(currentMonth.id));
+  // "2026-08-07" -> "Aug 7"
+  const fmtPayDate = s => {
+    if (!s) return null;
+    const MON = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+    const p = s.split("-").map(Number);
+    return MON[p[1]-1] + " " + p[2];
+  };
   const speedxTotal = Math.round(Object.values(speedxChecks).reduce((a, b) => a + b, 0) * 100) / 100;
 
   const groups = {};
@@ -2095,7 +2108,8 @@ app.get("/bookkeeping", requireAuth, (req, res) => {
   .grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 16px; align-items: start; }
   .card { background: #12122a; border-radius: 10px; padding: 14px; }
   .card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
-  .card-title { font-size: 14px; font-weight: bold; color: #7b8cde; }
+  .pay-date { font-weight: 400; color: #7a8aa0; font-size: 12px; }
+    .card-title { font-size: 14px; font-weight: bold; color: #7b8cde; }
   .card-income { font-size: 13px; color: #4CAF50; font-weight: bold; }
   .bill-row { display: flex; align-items: center; padding: 8px 0; border-bottom: 1px solid #1a1a2e; gap: 8px; }
   .bill-row:last-child { border-bottom: none; }
@@ -2166,7 +2180,7 @@ app.get("/bookkeeping", requireAuth, (req, res) => {
 
     html += `<div class="card">
       <div class="card-header">
-        <div class="card-title">${groupName}</div>
+        <div class="card-title">${groupName}${payDates[groupName] ? `<span class="pay-date"> · pays ${fmtPayDate(payDates[groupName])}</span>` : ''}</div>
         ${income ? `<div class="card-income">$${income.toFixed(0)} income · $${groupTotal.toFixed(0)} bills</div>` : (groupName === 'People' ? `<div class="card-income" style="color:#4CAF50">Owed: $${groupTotal.toFixed(0)}</div>` : (groupName === 'Subscriptions' ? `<div class="card-income" style="color:#4CAF50">$${peopleFunding.toFixed(0)} from People · $${groupTotal.toFixed(0)} bills</div>` : (groupTotal > 0 ? `<div class="card-income" style="color:#888">$${groupTotal.toFixed(0)} bills</div>` : '')))}
       </div>`;
 
@@ -2420,6 +2434,23 @@ function weekBillable(w) {
 }
 
 // Pay date for a delivery week = that week's Wednesday (week_start + 3) + 20 days
+// IT checks pay every Friday: check N = the Nth Friday of the bookkeeping month.
+// month is "YYYY-MM". Returns { "IT Check 1": "YYYY-MM-DD", ... } for the 4 checks.
+function itCheckDatesForMonth(monthStr) {
+  const [y, m] = monthStr.split('-').map(Number);
+  const fridays = [];
+  const d = new Date(Date.UTC(y, m - 1, 1));
+  while (d.getUTCMonth() === m - 1) {
+    if (d.getUTCDay() === 5) fridays.push(d.toISOString().slice(0, 10));
+    d.setUTCDate(d.getUTCDate() + 1);
+  }
+  const out = {};
+  for (let i = 0; i < 4; i++) {
+    if (fridays[i]) out['IT Check ' + (i + 1)] = fridays[i];
+  }
+  return out;
+}
+
 function payDateFor(weekStartStr) {
   const d = new Date(weekStartStr + 'T12:00:00');
   d.setDate(d.getDate() + 3 + 17);
@@ -2466,6 +2497,13 @@ function generateDeliveryWeeksForMonth(monthId, ym) {
 }
 
 // Returns the SpeedX Check label -> billable amount map for a specific month
+function speedxPayDatesForMonth(monthId) {
+  const weeks = db.prepare("SELECT * FROM delivery_weeks WHERE month_id = ? ORDER BY check_number").all(monthId);
+  const map = {};
+  weeks.forEach(w => { map['SpeedX Check ' + w.check_number] = payDateFor(w.week_start); });
+  return map;
+}
+
 function speedxByCheckForMonth(monthId) {
   const weeks = db.prepare("SELECT * FROM delivery_weeks WHERE month_id = ? ORDER BY check_number").all(monthId);
   const map = {};

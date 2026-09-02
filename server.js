@@ -2107,9 +2107,10 @@ app.get("/bookkeeping", requireAuth, (req, res) => {
   .notes-save:hover { background: #24382a; }
   .grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 16px; align-items: start; }
   .card { background: #12122a; border-radius: 10px; padding: 14px; }
-  .card-header { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; margin-bottom: 12px; }
+  .card-header { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-bottom: 12px; }
+  .card-title-wrap { display: flex; flex-direction: column; gap: 2px; }
   .pay-date { font-weight: 400; color: #7a8aa0; font-size: 12px; }
-    .card-title { font-size: 14px; font-weight: bold; color: #7b8cde; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .card-title { font-size: 14px; font-weight: bold; color: #7b8cde; }
   .card-income { font-size: 13px; color: #4CAF50; font-weight: bold; white-space: nowrap; flex: none; }
   .bill-row { display: flex; align-items: center; padding: 8px 0; border-bottom: 1px solid #1a1a2e; gap: 8px; }
   .bill-row:last-child { border-bottom: none; }
@@ -2180,7 +2181,10 @@ app.get("/bookkeeping", requireAuth, (req, res) => {
 
     html += `<div class="card">
       <div class="card-header">
-        <div class="card-title">${groupName}${payDates[groupName] ? `<span class="pay-date"> · pays ${fmtPayDate(payDates[groupName])}</span>` : ''}</div>
+        <div class="card-title-wrap">
+          <div class="card-title">${groupName}</div>
+          ${payDates[groupName] ? `<div class="pay-date">pays ${fmtPayDate(payDates[groupName])}</div>` : ''}
+        </div>
         ${income ? `<div class="card-income">$${income.toFixed(0)} income · $${groupTotal.toFixed(0)} bills</div>` : (groupName === 'People' ? `<div class="card-income" style="color:#4CAF50">Owed: $${groupTotal.toFixed(0)}</div>` : (groupName === 'Subscriptions' ? `<div class="card-income" style="color:#4CAF50">$${peopleFunding.toFixed(0)} from People · $${groupTotal.toFixed(0)} bills</div>` : (groupTotal > 0 ? `<div class="card-income" style="color:#888">$${groupTotal.toFixed(0)} bills</div>` : '')))}
       </div>`;
 

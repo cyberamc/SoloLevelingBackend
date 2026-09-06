@@ -3256,6 +3256,163 @@ ${reasons}
 });
 
 // ─── CCNA study plan page ─────────────────────────────────────────────────────
+app.get("/notes", requireAuth, (req, res) => {
+  res.send(`<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CCNA Notes</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #0a0a1a; color: #cfd4e0; font-family: -apple-system, sans-serif; line-height: 1.5; padding: 20px 16px 60px; max-width: 900px; margin: 0 auto; }
+  h1 { color: #fff; font-size: 24px; }
+  .subtitle { color: #7a8090; font-size: 13px; margin: 4px 0 16px; }
+  .nav { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 22px; }
+  .nav-item { background: #12122a; border: 1px solid #2a2a3a; border-radius: 8px; color: #9fb0d8; font-size: 13px; padding: 8px 12px; text-decoration: none; }
+  .nav-item:hover { border-color: #4a6cae; color: #cfe0ff; }
+  .note-card { background: #10101f; border: 1px solid #23233a; border-radius: 10px; overflow: hidden; margin-bottom: 20px; scroll-margin-top: 16px; }
+  .note-head { background: #14213a; padding: 16px 20px; }
+  .note-head h2 { color: #fff; font-size: 18px; }
+  .note-sub { color: #8ca3c8; font-size: 12px; margin-top: 3px; }
+  .note-sec { padding: 18px 20px; border-top: 1px solid #1c1c30; }
+  .note-sec h3 { color: #7b9cd8; font-size: 15px; display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+  .num { background: #14213a; color: #7b9cd8; border-radius: 50%; width: 24px; height: 24px; display: inline-flex; align-items: center; justify-content: center; flex: none; font-size: 13px; font-weight: 700; }
+  .formula { background: #14213a; border: 1px solid #2a3a5c; border-radius: 8px; padding: 14px; font-size: 18px; text-align: center; margin-bottom: 10px; color: #dfe6f5; }
+  .formula b { color: #7b9cd8; }
+  .amber { color: #e0a458; }
+  sup { font-size: .7em; }
+  .muted { font-size: 13px; color: #7a8090; margin-top: 8px; }
+  .keyrow { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+  .pill { display: inline-block; padding: 2px 10px; border-radius: 20px; font-size: 12px; font-weight: 600; }
+  .pill.blue { background: #14213a; color: #7b9cd8; }
+  .pill.amber { background: #2e2415; color: #e0a458; }
+  .callout { border-radius: 8px; padding: 12px 14px; font-size: 13px; margin-top: 12px; }
+  .callout.warn { background: #2a1616; border: 1px solid #5c2a2a; color: #e89aa0; }
+  .callout.ok { background: #14261a; border: 1px solid #2a5c3a; color: #8fd6a8; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; margin: 6px 0; }
+  th, td { border: 1px solid #23233a; padding: 8px 10px; text-align: left; }
+  th { background: #14213a; color: #cfe0ff; font-weight: 600; }
+  .mono, td code { font-family: Consolas, monospace; }
+  ol.steps { list-style: none; counter-reset: s; }
+  ol.steps li { counter-increment: s; position: relative; padding: 8px 0 8px 38px; border-bottom: 1px dashed #23233a; }
+  ol.steps li:last-child { border-bottom: none; }
+  ol.steps li::before { content: counter(s); position: absolute; left: 0; top: 7px; background: #14213a; color: #7b9cd8; width: 24px; height: 24px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700; }
+  .worked { background: #0d1420; border-left: 4px solid #4a6cae; border-radius: 0 8px 8px 0; padding: 12px 14px; margin-top: 12px; font-size: 13px; }
+  .worked .mono { background: #14213a; padding: 1px 5px; border-radius: 4px; }
+  .binbox { font-family: Consolas, monospace; font-size: 13px; background: #0a0f18; border: 1px solid #23233a; border-radius: 6px; padding: 10px 12px; margin-top: 8px; white-space: pre; overflow-x: auto; }
+  .blue-t { color: #7b9cd8; font-weight: 700; }
+  .amber-t { color: #e0a458; font-weight: 700; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 620px) { .grid2 { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<h1>CCNA Notes</h1>
+<div class="subtitle">Study reference</div>
+<div class="nav"><a class="nav-item" href="#subnetting">Subnetting & IP Addressing</a></div>
+<div class="note-card" id="subnetting"><div class="note-head"><h2>Subnetting & IP Addressing</h2><div class="note-sub">network bits vs host bits · IPv4 (32 bits)</div></div>
+<div class="note-sec">
+  <h3><span class="num">1</span> The two formulas</h3>
+  <div class="grid2">
+    <div>
+      <div class="formula">Subnets = <b>2<sup>borrowed bits</sup></b></div>
+      <p class="muted"><b>Borrowed bits</b> = prefix − class default (/8, /16, or /24). No "−2".</p>
+    </div>
+    <div>
+      <div class="formula">Hosts = <span class="amber">2<sup>host bits</sup> − 2</span></div>
+      <p class="muted"><b>Host bits</b> = 32 − prefix. Subtract 2 for network + broadcast.</p>
+    </div>
+  </div>
+  <div class="keyrow">
+    <span class="pill blue">host bits = 32 − prefix</span>
+    <span class="pill blue">borrowed = prefix − class default</span>
+    <span class="pill amber">only HOSTS get the −2</span>
+  </div>
+  <div class="callout warn"><b>Exceptions to −2:</b> /31 = 2 hosts (point-to-point, no network/broadcast) and /32 = 1 host. Every other mask uses 2<sup>n</sup> − 2.</div>
+</div>
+
+<div class="note-sec">
+  <h3><span class="num">2</span> Network, broadcast &amp; host range — block-size method</h3>
+  <ol class="steps">
+    <li><b>Block size = 256 − mask octet.</b> (/26 → 192, so 256 − 192 = <b>64</b>.)</li>
+    <li><b>Count up in that block size</b> (0, 64, 128, 192…) until you pass the host's octet — that's the block it lives in.</li>
+    <li><b>Network address</b> = bottom of the block <span class="pill amber">host bits all 0</span></li>
+    <li><b>Broadcast address</b> = top of the block (next block − 1) <span class="pill amber">host bits all 1</span></li>
+    <li><b>Valid hosts</b> = network + 1 → broadcast − 1</li>
+  </ol>
+  <div class="worked">
+    <b>Worked example — 198.22.45.173 /26</b><br>
+    Block size = 256 − 192 = <span class="mono">64</span> → blocks: .0, .64, .128, .192<br>
+    .173 falls in the <span class="mono">.128</span> block:
+    <div class="binbox">Network    : 198.22.45.<span class="blue-t">128</span>
+First host : 198.22.45.129
+Last host  : 198.22.45.190
+Broadcast  : 198.22.45.<span class="amber-t">191</span></div>
+    Check: 62 usable hosts (2<sup>6</sup> − 2)
+  </div>
+  <div class="callout ok"><b>Binary view:</b> the network address zeros out the host bits and keeps the network bits; broadcast sets the host bits to all 1s.</div>
+</div>
+
+<div class="note-sec">
+  <h3><span class="num">3</span> Address class by first octet</h3>
+  <table>
+    <tr><th>Class</th><th>First octet</th><th>Leading bits</th><th>Default mask</th><th>Purpose</th></tr>
+    <tr><td>A</td><td>1 – 126</td><td class="mono">0…</td><td>/8 (255.0.0.0)</td><td>very large networks</td></tr>
+    <tr><td>B</td><td>128 – 191</td><td class="mono">10…</td><td>/16 (255.255.0.0)</td><td>medium/large</td></tr>
+    <tr><td>C</td><td>192 – 223</td><td class="mono">110…</td><td>/24 (255.255.255.0)</td><td>small networks</td></tr>
+    <tr><td>D</td><td>224 – 239</td><td class="mono">1110</td><td>—</td><td>multicast</td></tr>
+    <tr><td>E</td><td>240 – 255</td><td class="mono">1111</td><td>—</td><td>experimental/reserved</td></tr>
+  </table>
+  <p class="muted"><b>127</b> = loopback (127.0.0.1 = localhost). <b>0.0.0.0/8</b> = "this network". Each class turns on the next bit, so ranges start at 128, 192, 224, 240.</p>
+</div>
+
+<div class="note-sec">
+  <h3><span class="num">4</span> Subnet mask octet values (fill from the left)</h3>
+  <table>
+    <tr><th>Bits on</th><td>1</td><td>2</td><td>3</td><td>4</td><td>5</td><td>6</td><td>7</td><td>8</td></tr>
+    <tr><th>Mask value</th><td>128</td><td>192</td><td>224</td><td>240</td><td>248</td><td>252</td><td>254</td><td>255</td></tr>
+    <tr><th>Block size</th><td>128</td><td>64</td><td>32</td><td>16</td><td>8</td><td>4</td><td>2</td><td>1</td></tr>
+  </table>
+  <p class="muted">Valid mask octets are only: 0, 128, 192, 224, 240, 248, 252, 254, 255. Block size = 256 − mask value.</p>
+</div>
+
+<div class="note-sec">
+  <h3><span class="num">5</span> Class C subnet quick-reference</h3>
+  <table>
+    <tr><th>Prefix</th><th>Mask</th><th>Block</th><th>Subnets</th><th>Hosts / subnet</th></tr>
+    <tr><td>/24</td><td>255.255.255.0</td><td>256</td><td>1</td><td>254</td></tr>
+    <tr><td>/25</td><td>255.255.255.128</td><td>128</td><td>2</td><td>126</td></tr>
+    <tr><td>/26</td><td>255.255.255.192</td><td>64</td><td>4</td><td>62</td></tr>
+    <tr><td>/27</td><td>255.255.255.224</td><td>32</td><td>8</td><td>30</td></tr>
+    <tr><td>/28</td><td>255.255.255.240</td><td>16</td><td>16</td><td>14</td></tr>
+    <tr><td>/29</td><td>255.255.255.248</td><td>8</td><td>32</td><td>6</td></tr>
+    <tr><td>/30</td><td>255.255.255.252</td><td>4</td><td>64</td><td>2</td></tr>
+    <tr><td>/31</td><td>255.255.255.254</td><td>2</td><td>128</td><td>2 <span class="pill amber">P2P only</span></td></tr>
+  </table>
+  <p class="muted"><b>/30 vs /31:</b> both give 2 hosts for router links. Use /30 on the exam unless told to use /31.</p>
+</div>
+
+<div class="note-sec">
+  <h3><span class="num">6</span> Other things worth remembering</h3>
+  <table>
+    <tr><th>Concept</th><th>Key point</th></tr>
+    <tr><td>Private ranges</td><td class="mono">10.0.0.0–10.255.255.255 · 172.16.0.0–172.31.255.255 · 192.168.0.0–192.168.255.255</td></tr>
+    <tr><td>Private size order</td><td>10.x biggest (~16.7M) &gt; 172.16–31 (~1M) &gt; 192.168 (~65K). Fewer octets locked = bigger.</td></tr>
+    <tr><td>CIDR</td><td>Classless — mask carried as /prefix, any boundary. Fixes class waste.</td></tr>
+    <tr><td>Route summarisation</td><td>Collapse routes sharing leading bits into one broader route. Smaller tables.</td></tr>
+    <tr><td>VLSM</td><td>Variable Length Subnet Masking — size subnets by host need (vs equal FLSM).</td></tr>
+    <tr><td>Network address</td><td>First address, host bits all 0 — names the subnet, not assignable.</td></tr>
+    <tr><td>Broadcast address</td><td>Last address, host bits all 1 — hits all hosts, not assignable.</td></tr>
+    <tr><td>ip subnet-zero</td><td>On by default — all subnets usable (old "subtract 2 for subnets" rule gone).</td></tr>
+    <tr><td>Different subnets</td><td>Hosts on different subnets must go through a router to talk.</td></tr>
+  </table>
+</div>
+</div>
+</body>
+</html>`);
+});
+
 app.get("/study", requireAuth, (req, res) => {
   const html = `<!DOCTYPE html>
 <html>

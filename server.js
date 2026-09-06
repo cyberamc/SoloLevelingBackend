@@ -3408,6 +3408,79 @@ Broadcast  : 198.22.45.<span class="amber-t">191</span></div>
     <tr><td>Different subnets</td><td>Hosts on different subnets must go through a router to talk.</td></tr>
   </table>
 </div>
+<div class="note-sec">
+  <h3><span class="num">7</span> The two subnetting question types</h3>
+  <p class="muted" style="margin-top:0">Almost every exam question is one of these two. Figure out which you're handed, then run the matching direction.</p>
+  <table>
+    <tr><th>You're given…</th><th>You're asked for…</th><th>Direction</th></tr>
+    <tr><td>An IP + mask/prefix</td><td>network addr, broadcast, host range</td><td>block-size method (§2)</td></tr>
+    <tr><td>A need: x subnets and/or y hosts</td><td>the subnet mask to use</td><td>work the formulas backward</td></tr>
+  </table>
+  <div class="callout ok" style="margin-top:16px">
+    <b>Backward from a requirement → mask</b>
+    <ol class="steps" style="margin-top:8px">
+      <li><b>Find the class</b> of the address → gives the default prefix (/8, /16, /24).</li>
+      <li><b>Need x subnets?</b> smallest borrowed bits where <span class="mono">2ⁿ ≥ x</span>. Then prefix = default + n.</li>
+      <li><b>Need y hosts?</b> smallest host bits where <span class="mono">2ⁿ − 2 ≥ y</span>. Then prefix = 32 − n.</li>
+      <li>Convert the prefix to dotted decimal if asked.</li>
+    </ol>
+  </div>
+  <div class="worked">
+    <b>Example — subnet 134.65.0.0 into 6 networks</b><br>
+    134 → Class B → default <span class="mono">/16</span>.<br>
+    6 subnets → smallest 2ⁿ ≥ 6 is 2³ = 8 → borrow <span class="mono">3</span> bits.<br>
+    Prefix = 16 + 3 = <b>/19</b> = <b>255.255.224.0</b> (third octet: 128+64+32 = 224).
+  </div>
+  <div class="callout warn">
+    <b>Watch the round-up:</b> bits are whole numbers. If the count isn't an exact power of 2, round <b>up</b> (6 subnets → 8). Spares go to future growth.<br><br>
+    <b>Watch the class:</b> always borrow from the <b>class default</b>, not /24 by habit. First octet tells you which (60→A, 134→B, 200→C).
+  </div>
+</div>
+
+<div class="note-sec">
+  <h3><span class="num">8</span> VLSM design — sizing a whole network</h3>
+  <p class="muted" style="margin-top:0">When one block must be carved into segments of <em>different</em> sizes, right-size each one instead of forcing them equal.</p>
+  <ol class="steps">
+    <li><b>List every segment and its host count.</b> Don't forget point-to-point links (2 hosts) — and router interfaces count as hosts.</li>
+    <li><b>Sort largest → smallest.</b> Always handle the biggest first.</li>
+    <li><b>Size each one:</b> smallest subnet where <span class="mono">2ⁿ − 2 ≥ hosts needed</span>.</li>
+    <li><b>Allocate from the start</b> of the address space, then continue down. Each subnet's block size sets where the next begins.</li>
+  </ol>
+  <div class="worked">
+    <b>Example — 200.15.10.0/24, Engineering = 28 hosts</b><br>
+    28 + 2 reserved = 30 needed → smallest block holding 30 is <b>32</b> → <b>/27</b> (30 usable). Allocate from the start:
+    <div class="binbox">NY Eng    : 200.15.10.<span class="blue-t">0</span>  – <span class="amber-t">31</span>   (/27, hosts .1–.30)
+Boston Eng: 200.15.10.<span class="blue-t">32</span> – <span class="amber-t">63</span>   (/27, hosts .33–.62)</div>
+    Next-largest (Sales 14) takes /28, the P2P link /30, etc.
+  </div>
+  <div class="callout ok">
+    <b>"Suitable size" = tightest fit.</b> Just big enough, never bigger. 28 hosts → /27 (30), not /26 (62, wasteful) or /28 (14, too small). Do <b>exactly</b> what the question asks.
+  </div>
+</div>
+
+<div class="note-sec">
+  <h3><span class="num">9</span> Reverse-lookup cheat lines (need → bits)</h3>
+  <div class="grid2">
+    <div>
+      <p class="muted" style="margin-top:0"><b>Subnets needed → borrow bits</b></p>
+      <table>
+        <tr><th>Need ≤</th><th>Borrow</th></tr>
+        <tr><td>2</td><td>1</td></tr><tr><td>4</td><td>2</td></tr><tr><td>8</td><td>3</td></tr>
+        <tr><td>16</td><td>4</td></tr><tr><td>32</td><td>5</td></tr><tr><td>64</td><td>6</td></tr>
+      </table>
+    </div>
+    <div>
+      <p class="muted" style="margin-top:0"><b>Hosts needed → host bits (2ⁿ−2)</b></p>
+      <table>
+        <tr><th>Need ≤</th><th>Host bits</th><th>Prefix</th></tr>
+        <tr><td>2</td><td>2</td><td>/30</td></tr><tr><td>6</td><td>3</td><td>/29</td></tr>
+        <tr><td>14</td><td>4</td><td>/28</td></tr><tr><td>30</td><td>5</td><td>/27</td></tr>
+        <tr><td>62</td><td>6</td><td>/26</td></tr><tr><td>126</td><td>7</td><td>/25</td></tr>
+      </table>
+    </div>
+  </div>
+  <p class="muted">Read down to the first row that covers your requirement. Prefix column assumes a Class C base; other classes use identical host math, only the subnets side shifts with the class default.</p>
+</div>
 </div>
 </body>
 </html>`);

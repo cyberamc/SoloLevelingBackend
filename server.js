@@ -2754,11 +2754,12 @@ app.get("/api/routine-editor/:tab", (req, res) => {
   }));
 
   const weeklyRows = db.prepare(
-    "SELECT id, title, time AS t, optional, monthly FROM weekly_quest_templates WHERE weekday = ?"
+    "SELECT id, title, time AS t, optional, monthly, interval_months, anchor_month FROM weekly_quest_templates WHERE weekday = ?"
   ).all(wd);
   const required = sortByTime(weeklyRows).map(r => ({
     title: r.title, time: r.t,
-    optional: r.optional ? 1 : 0, monthly: r.monthly ? 1 : 0
+    optional: r.optional ? 1 : 0, monthly: r.monthly ? 1 : 0,
+    interval_months: r.interval_months || 1, anchor_month: r.anchor_month || 0
   }));
 
   res.json({ tab, kind: "weekday", weekday: wd, daily, required });
@@ -2787,7 +2788,9 @@ app.post("/api/routine-editor/:tab", (req, res) => {
   })).sort((a, b) => reTimeToMinutes(a.time) - reTimeToMinutes(b.time));
   const cleanReq = required.map(it => ({
     title: String(it.title).trim(), time: reNormalizeTime(it.time),
-    optional: it.optional ? 1 : 0, monthly: it.monthly ? 1 : 0
+    optional: it.optional ? 1 : 0, monthly: it.monthly ? 1 : 0,
+    interval_months: Math.max(1, parseInt(it.interval_months, 10) || 1),
+    anchor_month: parseInt(it.anchor_month, 10) || 0
   })).sort((a, b) => reTimeToMinutes(a.time) - reTimeToMinutes(b.time));
 
   const tx = db.transaction(() => {
@@ -2815,9 +2818,9 @@ app.post("/api/routine-editor/:tab", (req, res) => {
     db.prepare("DELETE FROM weekly_quests WHERE weekday = ?").run(wd);
     db.prepare("DELETE FROM weekly_quest_templates WHERE weekday = ?").run(wd);
     const insW = db.prepare(
-      "INSERT INTO weekly_quest_templates (title, weekday, category, xp_reward, gold_reward, optional, time, monthly) VALUES (?, ?, 'STR', 10, 5, ?, ?, ?)"
+      "INSERT INTO weekly_quest_templates (title, weekday, category, xp_reward, gold_reward, optional, time, monthly, interval_months, anchor_month) VALUES (?, ?, 'STR', 10, 5, ?, ?, ?, ?, ?)"
     );
-    cleanReq.forEach(it => insW.run(it.title, wd, it.optional, it.time, it.monthly));
+    cleanReq.forEach(it => insW.run(it.title, wd, it.optional, it.time, it.monthly, it.interval_months, it.anchor_month));
   });
   tx();
   res.json({ success: true, tab, dailyCount: cleanDaily.length, requiredCount: cleanReq.length });
@@ -2938,6 +2941,10 @@ function mergedRow(item){
   c += '<td class="c col-del"><button class="del" onclick="this.closest(\\'tr\\').remove(); setDirty(true); refreshCounts();" title="Delete">&times;</button></td>';
   const tr = document.createElement('tr');
   tr.dataset.kind = kind;
+  // Preserve every-N-months fields that the form has no input for, so a save
+  // doesn't reset a bi-monthly quest back to plain monthly.
+  tr.dataset.interval = (item.interval_months != null ? item.interval_months : 1);
+  tr.dataset.anchor = (item.anchor_month != null ? item.anchor_month : 0);
   tr.innerHTML = c;
   return tr;
 }
@@ -3014,7 +3021,12 @@ async function save(){
       const kind=r.dataset.kind;
       const base={ title:r.querySelector('.f-title').value, time:r.querySelector('.f-time').value, optional:0 };
       if(kind==="daily"){ base.important = r.querySelector('.f-important').checked?1:0; daily.push(base); }
-      else { base.monthly = r.querySelector('.f-monthly').checked?1:0; required.push(base); }
+      else {
+        base.monthly = r.querySelector('.f-monthly').checked?1:0;
+        base.interval_months = parseInt(r.dataset.interval,10) || 1;
+        base.anchor_month = parseInt(r.dataset.anchor,10) || 0;
+        required.push(base);
+      }
     });
     body = { daily, required };
   }

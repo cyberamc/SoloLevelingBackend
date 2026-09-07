@@ -177,6 +177,14 @@ function generateWeeklyQuests() {
     if (t.monthly) {
       if (t.weekday !== todayWeekday) return;
       if (!isFirstWeekdayOfMonth) return;
+      // Every-N-months: only fire when this month matches the anchor's cycle parity.
+      const interval = t.interval_months && t.interval_months > 1 ? t.interval_months : 1;
+      if (interval > 1) {
+        const [yy, mo] = today.slice(0, 7).split('-').map(Number);
+        const monthIndex = yy * 12 + (mo - 1);
+        const anchor = t.anchor_month || 0;
+        if (((monthIndex - anchor) % interval + interval) % interval !== 0) return;
+      }
     }
     // Dedupe on title+weekday (NOT template_id): a template rebuild assigns new
     // template_ids, so matching on template_id would wrongly re-insert an existing
@@ -2385,6 +2393,15 @@ function initDeliveryTracker() {
   if (!wqtCols.includes('monthly')) {
     db.prepare("ALTER TABLE weekly_quest_templates ADD COLUMN monthly INTEGER NOT NULL DEFAULT 0").run();
   }
+  // interval_months: for monthly quests, fire every N months instead of every month.
+  // anchor_month: the (year*12 + month) value the cycle is aligned to, so "every 2
+  // months" lands on the same parity each time. Both default to a plain monthly (N=1).
+  if (!wqtCols.includes('interval_months')) {
+    db.prepare("ALTER TABLE weekly_quest_templates ADD COLUMN interval_months INTEGER NOT NULL DEFAULT 1").run();
+  }
+  if (!wqtCols.includes('anchor_month')) {
+    db.prepare("ALTER TABLE weekly_quest_templates ADD COLUMN anchor_month INTEGER NOT NULL DEFAULT 0").run();
+  }
   const wqCols = db.prepare("PRAGMA table_info(weekly_quests)").all().map(c => c.name);
   if (!wqCols.includes('monthly')) {
     db.prepare("ALTER TABLE weekly_quests ADD COLUMN monthly INTEGER NOT NULL DEFAULT 0").run();
@@ -3689,6 +3706,14 @@ function initReminders() {
       created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
     )
   `).run();
+  // interval_months / anchor_month let a monthly rule fire every N months (see nextOccurrence).
+  const rrCols = db.prepare("PRAGMA table_info(recurring_reminders)").all().map(x => x.name);
+  if (!rrCols.includes('interval_months')) {
+    db.prepare("ALTER TABLE recurring_reminders ADD COLUMN interval_months INTEGER NOT NULL DEFAULT 1").run();
+  }
+  if (!rrCols.includes('anchor_month')) {
+    db.prepare("ALTER TABLE recurring_reminders ADD COLUMN anchor_month INTEGER NOT NULL DEFAULT 0").run();
+  }
 }
 initReminders();
 
@@ -3718,10 +3743,14 @@ function nextOccurrence(rule, from) {
   }
   if (rule.type === 'monthly') {
     const dom = rule.day_of_month;
-    // Try this month, then following months; clamp to the month's last day.
-    for (let i = 0; i < 3; i++) {
+    const interval = rule.interval_months && rule.interval_months > 1 ? rule.interval_months : 1;
+    const anchor = rule.anchor_month || 0;
+    // Scan ahead enough months to cross one interval even for every-N-months rules.
+    for (let i = 0; i < interval * 2 + 2; i++) {
       const y = from.getFullYear();
       const m = from.getMonth() + i;
+      const monthIndex = y * 12 + m;   // m may exceed 11; that's fine, it's just an index
+      if (interval > 1 && (((monthIndex - anchor) % interval + interval) % interval !== 0)) continue;
       const lastDay = new Date(y, m + 1, 0).getDate();
       const day = Math.min(dom, lastDay);
       const c = new Date(y, m, day, hh, mm, 0, 0);

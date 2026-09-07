@@ -3726,6 +3726,11 @@ function initReminders() {
   if (!rrCols.includes('anchor_month')) {
     db.prepare("ALTER TABLE recurring_reminders ADD COLUMN anchor_month INTEGER NOT NULL DEFAULT 0").run();
   }
+  // nth_weekday: for monthly rules, fire on the FIRST occurrence of this weekday (0-6)
+  // in the month instead of a fixed day_of_month. NULL = use day_of_month as before.
+  if (!rrCols.includes('nth_weekday')) {
+    db.prepare("ALTER TABLE recurring_reminders ADD COLUMN nth_weekday INTEGER").run();
+  }
 }
 initReminders();
 
@@ -3755,16 +3760,25 @@ function nextOccurrence(rule, from) {
   }
   if (rule.type === 'monthly') {
     const dom = rule.day_of_month;
+    const nth = (rule.nth_weekday != null && rule.nth_weekday >= 0 && rule.nth_weekday <= 6)
+      ? rule.nth_weekday : null;
     const interval = rule.interval_months && rule.interval_months > 1 ? rule.interval_months : 1;
     const anchor = rule.anchor_month || 0;
     // Scan ahead enough months to cross one interval even for every-N-months rules.
     for (let i = 0; i < interval * 2 + 2; i++) {
       const y = from.getFullYear();
       const m = from.getMonth() + i;
-      const monthIndex = y * 12 + m;   // m may exceed 11; that's fine, it's just an index
+      const monthIndex = y * 12 + m;   // m may exceed 11; just an index
       if (interval > 1 && (((monthIndex - anchor) % interval + interval) % interval !== 0)) continue;
-      const lastDay = new Date(y, m + 1, 0).getDate();
-      const day = Math.min(dom, lastDay);
+      let day;
+      if (nth != null) {
+        // First occurrence of weekday `nth` in this month.
+        const firstDow = new Date(y, m, 1).getDay();
+        day = 1 + ((nth - firstDow + 7) % 7);
+      } else {
+        const lastDay = new Date(y, m + 1, 0).getDate();
+        day = Math.min(dom, lastDay);
+      }
       const c = new Date(y, m, day, hh, mm, 0, 0);
       if (c > from) return c;
     }
@@ -3838,6 +3852,9 @@ app.post("/api/recurring-reminders", (req, res) => {
   }
   let weekdays = null;
   let dayOfMonth = null;
+  let nthWeekday = null;
+  let intervalMonths = 1;
+  let anchorMonth = 0;
   if (type === "weekly") {
     const arr = Array.isArray(b.weekdays) ? b.weekdays : [];
     const clean = arr.map(n => parseInt(n, 10)).filter(n => n >= 0 && n <= 6);
@@ -3845,14 +3862,30 @@ app.post("/api/recurring-reminders", (req, res) => {
     weekdays = clean.sort((a, c) => a - c).join(",");
   }
   if (type === "monthly") {
-    dayOfMonth = parseInt(b.day_of_month, 10);
-    if (!(dayOfMonth >= 1 && dayOfMonth <= 31)) {
-      return res.status(400).json({ error: "day_of_month must be 1-31" });
+    // Either nth_weekday (first occurrence of a weekday) OR a fixed day_of_month.
+    nthWeekday = (b.nth_weekday != null && b.nth_weekday !== "") ? parseInt(b.nth_weekday, 10) : null;
+    if (nthWeekday != null) {
+      if (!(nthWeekday >= 0 && nthWeekday <= 6)) {
+        return res.status(400).json({ error: "nth_weekday must be 0-6" });
+      }
+    } else {
+      dayOfMonth = parseInt(b.day_of_month, 10);
+      if (!(dayOfMonth >= 1 && dayOfMonth <= 31)) {
+        return res.status(400).json({ error: "day_of_month must be 1-31" });
+      }
+    }
+    // Optional every-N-months; anchor to the current month if an interval is given.
+    intervalMonths = Math.max(1, parseInt(b.interval_months, 10) || 1);
+    if (intervalMonths > 1) {
+      const now = new Date();
+      anchorMonth = (b.anchor_month != null && b.anchor_month !== "")
+        ? parseInt(b.anchor_month, 10)
+        : now.getFullYear() * 12 + now.getMonth();
     }
   }
   const info = db.prepare(
-    "INSERT INTO recurring_reminders (title, type, time_str, weekdays, day_of_month) VALUES (?, ?, ?, ?, ?)"
-  ).run(title, type, time, weekdays, dayOfMonth);
+    "INSERT INTO recurring_reminders (title, type, time_str, weekdays, day_of_month, nth_weekday, interval_months, anchor_month) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+  ).run(title, type, time, weekdays, dayOfMonth, nthWeekday, intervalMonths, anchorMonth);
   materializeRecurringReminders();
   res.json({ success: true, id: info.lastInsertRowid });
 });

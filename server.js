@@ -2141,7 +2141,7 @@ app.get("/bookkeeping", requireAuth, (req, res) => {
 </head>
 <body>
 <h1>Bookkeeping</h1>
-<div class="subtitle">Solo Leveling Finance Tracker · <a href="/logout" style="color:#7b8cde;">Log out</a></div>
+<div class="subtitle">Solo Leveling Finance Tracker · <a href="/delivery-history" style="color:#7b8cde;">Delivery History</a> · <a href="/logout" style="color:#7b8cde;">Log out</a></div>
 
 <div class="month-selector">
   ${months.slice().sort((a, b) => a.month.localeCompare(b.month)).map(m => {
@@ -2534,9 +2534,104 @@ function speedxByCheckForMonth(monthId) {
   return map;
 }
 
+// ─── Delivery history ─────────────────────────────────────────────────────────
+// Every delivery week ever recorded, grouped by bookkeeping month (newest first),
+// with the full per-day breakdown so a paycheck discrepancy can be checked against
+// what was actually delivered. Labels day1/day2 as Fri/Sat from the cutoff, Tue/Wed
+// before it (matches the tracker).
+const DELIVERY_FRISAT_FROM_SRV = "2026-08-16";
+function deliveryDayLabels(weekStart) {
+  return weekStart >= DELIVERY_FRISAT_FROM_SRV ? ["Fri", "Sat"] : ["Tue", "Wed"];
+}
+
+app.get("/api/delivery-history", (req, res) => {
+  const weeks = db.prepare(`
+    SELECT dw.*, m.month AS month_str
+    FROM delivery_weeks dw
+    LEFT JOIN bookkeeping_months m ON dw.month_id = m.id
+    ORDER BY dw.week_start DESC
+  `).all();
+
+  const rows = weeks.map(w => {
+    const [d1, d2] = deliveryDayLabels(w.week_start);
+    const day1Billable = Math.max(0, w.tue_delivered - w.tue_duplicates - w.tue_undeliverable);
+    const day2Billable = Math.max(0, w.wed_delivered - w.wed_duplicates - w.wed_undeliverable);
+    return {
+      week_start: w.week_start,
+      month: w.month_str || w.week_start.slice(0, 7),
+      check_number: w.check_number,
+      pay_date: payDateFor(w.week_start),
+      paid: w.paid ? 1 : 0,
+      billable_amount: Math.round(weekBillable(w) * 100) / 100,
+      day1: {
+        label: d1, delivered: w.tue_delivered, duplicates: w.tue_duplicates,
+        undeliverable: w.tue_undeliverable, billable: day1Billable,
+        route324: w.tue_route324 ? 1 : 0, route121: w.tue_route121 ? 1 : 0
+      },
+      day2: {
+        label: d2, delivered: w.wed_delivered, duplicates: w.wed_duplicates,
+        undeliverable: w.wed_undeliverable, billable: day2Billable,
+        route324: w.wed_route324 ? 1 : 0, route121: w.wed_route121 ? 1 : 0
+      }
+    };
+  });
+
+  // Group by month, preserving newest-first order.
+  const byMonth = {};
+  const order = [];
+  rows.forEach(r => {
+    if (!byMonth[r.month]) { byMonth[r.month] = []; order.push(r.month); }
+    byMonth[r.month].push(r);
+  });
+  const months = order.map(m => ({
+    month: m,
+    weeks: byMonth[m],
+    totalDelivered: byMonth[m].reduce((a, w) => a + w.day1.delivered + w.day2.delivered, 0),
+    totalBillable: Math.round(byMonth[m].reduce((a, w) => a + w.billable_amount, 0) * 100) / 100
+  }));
+  res.json({ months });
+});
+
 // ─── SpeedX paychecks (Finance page card) ─────────────────────────────────────
 // Lists the current bookkeeping month's checks (one per delivery week, month_id =
 // current month) with amount, pay date, and a per-check "paid" toggle.
+// Full delivery history for dispute reference: every recorded week with per-day
+// package counts, duplicates, undeliverables, route, billable amount, pay date, paid.
+app.get("/api/delivery-history", (req, res) => {
+  const weeks = db.prepare(`
+    SELECT dw.*, bm.month AS month_str
+    FROM delivery_weeks dw
+    LEFT JOIN bookkeeping_months bm ON dw.month_id = bm.id
+    ORDER BY dw.week_start DESC
+  `).all();
+  const out = weeks.map(w => {
+    const tueBill = Math.max(0, w.tue_delivered - w.tue_duplicates - w.tue_undeliverable);
+    const wedBill = Math.max(0, w.wed_delivered - w.wed_duplicates - w.wed_undeliverable);
+    const tueRate = w.tue_route324 ? 1.90 : (w.tue_route121 ? 1.80 : 1.60);
+    const wedRate = w.wed_route324 ? 1.90 : (w.wed_route121 ? 1.80 : 1.60);
+    const routeName = (r324, r121) => r324 ? "324" : (r121 ? "121" : "std");
+    return {
+      week_start: w.week_start,
+      month: w.month_str,
+      check_number: w.check_number,
+      pay_date: payDateFor(w.week_start),
+      paid: w.paid ? 1 : 0,
+      day1: {
+        delivered: w.tue_delivered, duplicates: w.tue_duplicates,
+        undeliverable: w.tue_undeliverable, billable: tueBill,
+        route: routeName(w.tue_route324, w.tue_route121), rate: tueRate
+      },
+      day2: {
+        delivered: w.wed_delivered, duplicates: w.wed_duplicates,
+        undeliverable: w.wed_undeliverable, billable: wedBill,
+        route: routeName(w.wed_route324, w.wed_route121), rate: wedRate
+      },
+      billable: Math.round(weekBillable(w) * 100) / 100
+    };
+  });
+  res.json({ weeks: out });
+});
+
 app.get("/api/speedx-checks", (req, res) => {
   // Show the month we're actually IN, not the newest row that happens to exist.
   // Bookkeeping months are often created ahead of time, so ORDER BY month DESC
@@ -3515,6 +3610,93 @@ Boston Eng: 200.15.10.<span class="blue-t">32</span> – <span class="amber-t">6
 </html>`);
 });
 
+app.get("/delivery-history", requireAuth, (req, res) => {
+  // Reuse the JSON builder by calling the same query logic inline.
+  const weeks = db.prepare(`
+    SELECT dw.*, m.month AS month_str
+    FROM delivery_weeks dw
+    LEFT JOIN bookkeeping_months m ON dw.month_id = m.id
+    ORDER BY dw.week_start DESC
+  `).all();
+  const fmtDate = s => {
+    if (!s) return "";
+    const MON = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+    const p = s.split("-").map(Number);
+    return MON[p[1]-1] + " " + p[2];
+  };
+  const esc = s => String(s == null ? "" : s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+
+  const byMonth = {}; const order = [];
+  weeks.forEach(w => {
+    const m = w.month_str || w.week_start.slice(0,7);
+    if (!byMonth[m]) { byMonth[m] = []; order.push(m); }
+    byMonth[m].push(w);
+  });
+
+  const dayCell = (w, pfx, label) => {
+    const del = w[pfx+"_delivered"], dup = w[pfx+"_duplicates"], und = w[pfx+"_undeliverable"];
+    const bill = Math.max(0, del - dup - und);
+    const route = w[pfx+"_route324"] ? " · 324" : (w[pfx+"_route121"] ? " · 121" : "");
+    return `<td><b>${label}${route}</b><br>` +
+           `<span class="d">${del} delivered</span><br>` +
+           `<span class="dup">${dup} dup · ${und} undeliv</span><br>` +
+           `<span class="bill">${bill} billable</span></td>`;
+  };
+
+  let body = "";
+  order.forEach(m => {
+    const wks = byMonth[m];
+    let totalDel = 0, totalBill = 0;
+    wks.forEach(w => {
+      totalDel += w.tue_delivered + w.wed_delivered;
+      totalBill += weekBillable(w);
+    });
+    body += `<h2>${esc(m)} <span class="mtot">${totalDel} delivered · $${totalBill.toFixed(2)}</span></h2>`;
+    body += `<table><tr><th>Week / Check</th><th>Day 1</th><th>Day 2</th><th>Billable</th><th>Pay date</th><th></th></tr>`;
+    wks.forEach(w => {
+      const friSat = w.week_start >= "2026-08-16";
+      const [l1, l2] = friSat ? ["Fri","Sat"] : ["Tue","Wed"];
+      const paid = w.paid
+        ? '<span class="pill ok">Paid</span>'
+        : '<span class="pill no">Unpaid</span>';
+      body += `<tr>` +
+        `<td><b>Check ${w.check_number ?? "—"}</b><br><span class="d">wk ${esc(fmtDate(w.week_start))}</span></td>` +
+        dayCell(w, "tue", l1) + dayCell(w, "wed", l2) +
+        `<td class="bigbill">$${weekBillable(w).toFixed(2)}</td>` +
+        `<td>${esc(fmtDate(payDateFor(w.week_start)))}</td>` +
+        `<td>${paid}</td>` +
+        `</tr>`;
+    });
+    body += `</table>`;
+  });
+  if (!order.length) body = '<p class="empty">No delivery weeks recorded yet.</p>';
+
+  res.send(`<!DOCTYPE html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Delivery History</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #0a0a1a; color: #cfd4e0; font-family: -apple-system, sans-serif; padding: 18px 14px 60px; max-width: 900px; margin: 0 auto; }
+  h1 { color: #fff; font-size: 24px; margin-bottom: 4px; }
+  .sub { color: #7a8090; font-size: 13px; margin-bottom: 18px; }
+  h2 { color: #7b9cd8; font-size: 15px; margin: 22px 0 8px; display: flex; justify-content: space-between; align-items: baseline; }
+  .mtot { color: #8fd6a8; font-size: 12px; font-weight: 400; }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; margin-bottom: 8px; }
+  th, td { border: 1px solid #23233a; padding: 7px 8px; text-align: left; vertical-align: top; }
+  th { background: #14213a; color: #cfe0ff; font-weight: 600; }
+  .d { color: #9aa4b8; } .dup { color: #c98a8a; } .bill { color: #8fd6a8; }
+  .bigbill { color: #8fd6a8; font-weight: 700; font-size: 14px; }
+  .pill { display: inline-block; padding: 2px 9px; border-radius: 12px; font-size: 11px; font-weight: 700; }
+  .pill.ok { background: #14261a; color: #8fd6a8; } .pill.no { background: #2a1616; color: #e89aa0; }
+  .empty { color: #666; padding: 20px 0; }
+</style></head>
+<body>
+<h1>Delivery History</h1>
+<div class="sub">Every recorded delivery week — reference for paycheck discrepancies</div>
+${body}
+</body></html>`);
+});
+
 app.get("/study", requireAuth, (req, res) => {
   const html = `<!DOCTYPE html>
 <html>
@@ -3623,6 +3805,85 @@ async function toggle(id, done){
   load();
 }
 
+load();
+</script>
+</body>
+</html>`;
+  res.send(html);
+});
+
+app.get("/delivery-history", requireAuth, (req, res) => {
+  const html = `<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Delivery History</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #0a0a1a; color: #cfd4e0; font-family: -apple-system, sans-serif; padding: 18px 14px 60px; max-width: 820px; margin: 0 auto; }
+  h1 { color: #fff; font-size: 24px; }
+  .subtitle { color: #7a8090; font-size: 13px; margin: 4px 0 18px; }
+  h2 { color: #7b8cde; font-size: 13px; letter-spacing: 1px; text-transform: uppercase; margin: 20px 0 8px; }
+  .wk { background: #12122a; border: 1px solid #23233a; border-radius: 10px; margin-bottom: 12px; overflow: hidden; }
+  .wk-head { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; padding: 12px 14px; background: #14213a; }
+  .wk-title { color: #dfe6f5; font-size: 14px; font-weight: 700; }
+  .wk-sub { color: #8ca3c8; font-size: 11px; margin-top: 2px; }
+  .wk-right { text-align: right; flex: none; }
+  .amt { color: #4CAF50; font-size: 15px; font-weight: 700; }
+  .pill { display: inline-block; padding: 1px 8px; border-radius: 20px; font-size: 11px; font-weight: 700; margin-top: 3px; }
+  .paid { background: #14261a; color: #6fcf8f; }
+  .unpaid { background: #2a1616; color: #e89aa0; }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  th, td { border-bottom: 1px solid #1c1c30; padding: 7px 14px; text-align: right; }
+  th:first-child, td:first-child { text-align: left; }
+  th { color: #8890a5; font-weight: 600; font-size: 11px; }
+  td.day { color: #cfe0ff; font-weight: 600; text-align: left; }
+  .bill { color: #4CAF50; font-weight: 700; }
+  .empty { color: #666; padding: 20px; text-align: center; }
+</style>
+</head>
+<body>
+<h1>Delivery History</h1>
+<div class="subtitle">Every recorded week &middot; for paycheck reference</div>
+<div id="content"><div class="empty">Loading&hellip;</div></div>
+<script>
+function esc(s){ return String(s==null?"":s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
+var MON=["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+function fmtD(s){ if(!s) return "?"; var p=s.split("-").map(Number); return MON[p[1]-1]+" "+p[2]; }
+function fmtMonth(s){ if(!s) return "Unassigned"; var p=s.split("-").map(Number); return MON[p[1]-1]+" "+p[0]; }
+
+function dayRow(label, d){
+  return '<tr><td class="day">'+label+' ('+esc(d.route)+' @ $'+d.rate.toFixed(2)+')</td>'+
+         '<td>'+d.delivered+'</td><td>'+d.duplicates+'</td><td>'+d.undeliverable+'</td>'+
+         '<td class="bill">'+d.billable+'</td></tr>';
+}
+
+async function load(){
+  var content=document.getElementById("content");
+  try {
+    var r=await fetch("/api/delivery-history");
+    var data=await r.json();
+    var weeks=data.weeks||[];
+    if(!weeks.length){ content.innerHTML='<div class="empty">No delivery weeks recorded yet.</div>'; return; }
+    var byMonth={};
+    weeks.forEach(function(w){ (byMonth[w.month]=byMonth[w.month]||[]).push(w); });
+    var h="";
+    Object.keys(byMonth).forEach(function(m){
+      h+='<h2>'+esc(fmtMonth(m))+'</h2>';
+      byMonth[m].forEach(function(w){
+        h+='<div class="wk"><div class="wk-head"><div>'+
+           '<div class="wk-title">Week of '+fmtD(w.week_start)+' &middot; Check '+(w.check_number||"?")+'</div>'+
+           '<div class="wk-sub">pays '+fmtD(w.pay_date)+'</div></div>'+
+           '<div class="wk-right"><div class="amt">$'+w.billable.toFixed(2)+'</div>'+
+           '<span class="pill '+(w.paid?"paid":"unpaid")+'">'+(w.paid?"PAID":"UNPAID")+'</span></div></div>'+
+           '<table><tr><th>Day</th><th>Delivered</th><th>Dupes</th><th>Undel.</th><th>Billable</th></tr>'+
+           dayRow("Day 1", w.day1)+dayRow("Day 2", w.day2)+'</table></div>';
+      });
+    });
+    content.innerHTML=h;
+  } catch(e){ content.innerHTML='<div class="empty">Could not load history.</div>'; }
+}
 load();
 </script>
 </body>

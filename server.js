@@ -1743,6 +1743,69 @@ function initRoutineReference() {
   }
 }
 initRoutineReference();
+// ─── CCNA daily schedule ──────────────────────────────────────────────────────
+// A study-day timeline keyed by weekday (Sun-Thu = 0-4). Fri/Sat are delivery days
+// with no CCNA block, so they return empty. Shown as a collapsible card on Tasks.
+function initCcnaSchedule() {
+  db.prepare(`
+    CREATE TABLE IF NOT EXISTS ccna_schedule (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      weekday INTEGER NOT NULL,
+      sort_order INTEGER NOT NULL,
+      title TEXT NOT NULL
+    )
+  `).run();
+  const count = db.prepare("SELECT COUNT(*) AS c FROM ccna_schedule").get().c;
+  if (count === 0) {
+    const ins = db.prepare("INSERT INTO ccna_schedule (weekday, sort_order, title) VALUES (?, ?, ?)");
+    ins.run(0, 0, '9:00 AM - Vape & Study');
+    ins.run(0, 1, '9:30 AM - Play 1-2 Overwatch Matches');
+    ins.run(0, 2, '10:00 AM - Study');
+    ins.run(0, 3, '10:30 AM - Eat');
+    ins.run(0, 4, '11:00 AM - Review & Lab');
+    ins.run(1, 0, '8:00 AM - Vape & Study');
+    ins.run(1, 1, '8:30 AM - Play 1-2 Overwatch Matches');
+    ins.run(1, 2, '9:00 AM - Study');
+    ins.run(1, 3, '9:30 AM - Eat');
+    ins.run(1, 4, '10:00 AM - Review');
+    ins.run(1, 5, '10:30 AM - Shower');
+    ins.run(1, 6, '11:00 AM - Lab');
+    ins.run(2, 0, '8:00 AM - Shower');
+    ins.run(2, 1, '8:30 AM - Vape & Study');
+    ins.run(2, 2, '9:00 AM - Play 1-2 Overwatch Matches');
+    ins.run(2, 3, '9:30 AM - Study');
+    ins.run(2, 4, '10:00 AM - Eat');
+    ins.run(2, 5, '10:30 AM - Review & Lab');
+    ins.run(3, 0, '8:00 AM - Vape & Study');
+    ins.run(3, 1, '8:30 AM - Play 1-2 Overwatch Matches');
+    ins.run(3, 2, '9:00 AM - Study');
+    ins.run(3, 3, '9:30 AM - Eat');
+    ins.run(3, 4, '10:00 AM - Review');
+    ins.run(3, 5, '10:30 AM - Shower');
+    ins.run(3, 6, '11:00 AM - Lab');
+    ins.run(4, 0, '7:30 AM - Vape & Study');
+    ins.run(4, 1, '8:00 AM - Play 1-2 Overwatch Matches');
+    ins.run(4, 2, '8:30 AM - Study');
+    ins.run(4, 3, '9:00 AM - Eat');
+    ins.run(4, 4, '9:30 AM - Review');
+    ins.run(4, 5, '10:00 AM - Shower');
+    ins.run(4, 6, '10:30 AM - Lab');
+    console.log("ccna_schedule seeded");
+  }
+}
+initCcnaSchedule();
+
+// GET /api/ccna-schedule — today's steps by default, or ?weekday=0-6.
+app.get("/api/ccna-schedule", (req, res) => {
+  const wd = parseInt(req.query.weekday, 10);
+  const weekday = Number.isFinite(wd) && wd >= 0 && wd <= 6 ? wd : new Date().getDay();
+  const rows = db.prepare(
+    "SELECT title FROM ccna_schedule WHERE weekday = ? ORDER BY sort_order"
+  ).all(weekday);
+  res.json({ weekday, items: rows.map(r => r.title) });
+});
+
+
 
 // Today's routine section: WFM = Sun-Thu (weekday 0-4), Delivery = Fri/Sat (5-6).
 // Sun(0) & Wed(3) are rest days (plasma, no gym); Mon(1), Tue(2), Thu(4) are gym

@@ -866,7 +866,12 @@ app.get("/api/quests", (req, res) => {
   generateWeeklyQuests();
   const today = db.prepare("SELECT date('now', 'localtime') as today").get().today;
   const daily = db.prepare("SELECT * FROM quests WHERE created_date = ? AND type = 'daily' ORDER BY id").all(today);
-  const weekly = db.prepare("SELECT * FROM weekly_quests ORDER BY weekday, optional, completed").all();
+  // A monthly quest fires once and, once completed, should drop off the board for the
+  // rest of the month rather than linger as a checked item. It stays in the DB (the
+  // monthly purge clears it next month); it's just filtered out of the response here.
+  const weekly = db.prepare(
+    "SELECT * FROM weekly_quests WHERE NOT (monthly = 1 AND completed = 1) ORDER BY weekday, optional, completed"
+  ).all();
   const req_weekly = weekly.filter(q => !q.optional);
   res.json({
     dailyQuests: daily,
@@ -883,7 +888,7 @@ app.get("/api/quests", (req, res) => {
 app.get("/api/weekly-quests/all", (req, res) => {
   generateWeeklyQuests();
   const todayWeekday = db.prepare("SELECT CAST(strftime('%w', 'now', 'localtime') AS INTEGER) as dayOfWeek").get().dayOfWeek;
-  const all = db.prepare("SELECT wq.* FROM weekly_quests wq ORDER BY wq.weekday, wq.optional, wq.completed").all();
+  const all = db.prepare("SELECT wq.* FROM weekly_quests wq WHERE NOT (wq.monthly = 1 AND wq.completed = 1) ORDER BY wq.weekday, wq.optional, wq.completed").all();
   const withOverdue = all.map(q => ({
     ...q,
     isOverdue: q.completed === 0 && q.optional === 0 && q.weekday !== todayWeekday ? 1 : 0

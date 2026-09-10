@@ -3893,6 +3893,10 @@ app.get("/study", requireAuth, (req, res) => {
   .bar { height: 8px; background: #1e1e30; border-radius: 4px; overflow: hidden; margin-bottom: 6px; }
   .fill { height: 8px; background: #FFD700; width: 0%; }
   .prog { color: #FFD700; font-size: 12px; font-weight: 700; margin-bottom: 18px; }
+  .wkhead { cursor: pointer; display: flex; justify-content: space-between; align-items: center; }
+  .wkhead .chev { color: #6a7a9a; font-size: 12px; }
+  .wkgroup.collapsed .card { display: none; }
+  .wkgroup.collapsed h2 { opacity: 0.7; }
   h2 { color: #b9b9ff; font-size: 12px; font-weight: 700; letter-spacing: 1px;
        text-transform: uppercase; margin: 18px 0 8px; }
   .card { background: #12122a; border: 1px solid #2a2a3a; border-radius: 8px; overflow: hidden; }
@@ -3966,7 +3970,11 @@ async function load(){
       ? ' <span class="wk">' + fmtShort(items[0].date) + " &ndash; " + fmtShort(items[items.length-1].date) + "</span>"
       : "";
     label += range;
-    h += '<h2>' + label + '</h2><div class="card">';
+    // Completed weeks start collapsed so the page opens on the current one.
+    const collapsed = allDone;
+    h += '<div class="wkgroup' + (collapsed ? ' collapsed' : '') + '">';
+    h += '<h2 class="wkhead">' + label + '<span class="chev">' + (collapsed ? '&#9656;' : '&#9662;') + '</span></h2>';
+    h += '<div class="card">';
     items.forEach(function(i){
       h += '<div class="row' + (i.done ? ' done' : '') + (i.is_today ? ' today' : '') + '">' +
            '<input type="checkbox" data-id="' + i.id + '"' + (i.done ? ' checked' : '') + '>' +
@@ -3976,12 +3984,20 @@ async function load(){
            (i.done_at ? '<span class="dn">' + esc(i.done_at) + '</span>' : '') +
            '</div>';
     });
-    h += '</div>';
+    h += '</div></div>';
   });
   const content = document.getElementById("content");
   content.innerHTML = h;
   content.querySelectorAll('input[type=checkbox]').forEach(function(cb){
     cb.addEventListener("change", function(){ toggle(cb.getAttribute('data-id'), cb.checked); });
+  });
+  content.querySelectorAll('.wkhead').forEach(function(head){
+    head.addEventListener("click", function(){
+      var grp = head.parentElement;
+      grp.classList.toggle("collapsed");
+      var chev = head.querySelector(".chev");
+      if (chev) chev.innerHTML = grp.classList.contains("collapsed") ? "\u25b8" : "\u25be";
+    });
   });
 }
 

@@ -1473,6 +1473,15 @@ function initStudyPlan() {
 }
 initStudyPlan();
 
+// Per-row scheduled date. When set, it's authoritative (no drift). Older rows fall
+// back to the legacy start_date formula so nothing breaks before a reseed.
+(function initStudyPlanDate() {
+  const cols = db.prepare("PRAGMA table_info(study_plan)").all().map(x => x.name);
+  if (!cols.includes("date")) {
+    db.prepare("ALTER TABLE study_plan ADD COLUMN date TEXT").run();
+  }
+})();
+
 app.get("/api/study-plan", (req, res) => {
   const meta = db.prepare("SELECT start_date FROM study_plan_meta WHERE id = 1").get();
   const start = meta ? meta.start_date : "2026-08-30";
@@ -1480,8 +1489,8 @@ app.get("/api/study-plan", (req, res) => {
   const offset = db.prepare("SELECT date(?, '+' || ? || ' days') AS d");
   const rows = db.prepare("SELECT * FROM study_plan ORDER BY week, day").all()
     .map(r => {
-      const n = (r.week - 1) * 7 + (r.day - 1);
-      const date = offset.get(start, n).d;
+      // Stored date wins; fall back to the legacy formula only if a row lacks one.
+      const date = r.date || offset.get(start, (r.week - 1) * 7 + (r.day - 1)).d;
       return Object.assign({}, r, { date, is_today: date === today ? 1 : 0 });
     });
   const done = rows.filter(r => r.done).length;

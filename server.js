@@ -3488,6 +3488,10 @@ app.get("/notes", requireAuth, (req, res) => {
   .worked { background: #0d1420; border-left: 4px solid #4a6cae; border-radius: 0 8px 8px 0; padding: 12px 14px; margin-top: 12px; font-size: 13px; }
   .worked .mono { background: #14213a; padding: 1px 5px; border-radius: 4px; }
   .binbox { font-family: Consolas, monospace; font-size: 13px; background: #0a0f18; border: 1px solid #23233a; border-radius: 6px; padding: 10px 12px; margin-top: 8px; white-space: pre; overflow-x: auto; }
+  .cmd { font-family: Consolas, monospace; background: #0a0f18; border: 1px solid #23233a; border-radius: 3px; padding: 1px 5px; font-size: 12px; color: #a9c4e6; }
+  tr.hl td { background: #14213a; }
+  .flow { background: #0d1420; border: 1px solid #23233a; border-radius: 6px; padding: 10px 12px; font-size: 13px; margin-top: 6px; line-height: 1.7; }
+  .flow b { color: #8fd6a8; }
   .blue-t { color: #7b9cd8; font-weight: 700; }
   .amber-t { color: #e0a458; font-weight: 700; }
   .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
@@ -3497,7 +3501,7 @@ app.get("/notes", requireAuth, (req, res) => {
 <body>
 <h1>CCNA Notes</h1>
 <div class="subtitle">Study reference</div>
-<div class="nav"><a class="nav-item" href="#subnetting">Subnetting & IP Addressing</a></div>
+<div class="nav"><a class="nav-item" href="#subnetting">Subnetting & IP Addressing</a><a class="nav-item" href="#dns-arp">DNS &amp; ARP</a></div>
 <div class="note-card" id="subnetting"><div class="note-head"><h2>Subnetting & IP Addressing</h2><div class="note-sub">network bits vs host bits · IPv4 (32 bits)</div></div>
 <div class="note-sec">
   <h3><span class="num">1</span> The two formulas</h3>
@@ -3667,6 +3671,84 @@ Boston Eng: 200.15.10.<span class="blue-t">32</span> – <span class="amber-t">6
     </div>
   </div>
   <p class="muted">Read down to the first row that covers your requirement. Prefix column assumes a Class C base; other classes use identical host math, only the subnets side shifts with the class default.</p>
+</div>
+</div>
+
+<div class="note-card" id="dns-arp"><div class="note-head"><h2>DNS &amp; ARP</h2><div class="note-sub">IP-to-name (DNS) and IP-to-MAC (ARP) resolution</div></div>
+<div class="note-sec">
+  <h3><span class="num">1</span> Two resolution steps</h3>
+  <p class="muted" style="margin-top:0">To build a packet, the sender needs the receiver's <b>IP address</b> and <b>MAC address</b>.</p>
+  <div class="keyrow">
+    <span class="pill blue">DNS: name (FQDN) &rarr; IP</span>
+    <span class="pill amber">ARP: IP &rarr; MAC</span>
+  </div>
+  <p class="muted">You may point the sender directly at an IP, or at an FQDN that DNS resolves first.</p>
+</div>
+<div class="note-sec">
+  <h3><span class="num">2</span> DNS &nbsp;<span class="pill blue">UDP 53</span></h3>
+  <ul style="margin:0;padding-left:18px;line-height:1.7">
+    <li>Resolves an <b>FQDN</b> (e.g. <span class="cmd">www.cisco.com</span>) to an IP address.</li>
+    <li>Enterprises run an <b>internal DNS server</b> that resolves internal hosts; clients query it.</li>
+    <li>If it can't resolve, it <b>forwards</b> to public DNS servers on the Internet.</li>
+    <li>Uses <b>UDP port 53</b> &mdash; can fail over to <b>TCP</b>.</li>
+  </ul>
+</div>
+<div class="note-sec">
+  <h3><span class="num">3</span> ARP &mdash; how it works &nbsp;<span class="pill amber">same subnet</span></h3>
+  <div class="flow">
+    <b>Request &rarr;</b> broadcast: "Who has <span class="cmd">172.23.4.2</span>? What's your MAC?" &middot; Src MAC = sender &middot; Dst MAC = <span class="cmd">FFFF.FFFF.FFFF</span><br>
+    <b>&larr; Reply</b> unicast: "I'm 172.23.4.2, here's my MAC." &middot; Src MAC = target &middot; Dst MAC = sender
+  </div>
+  <p class="muted">Replies are cached in the host's <b>ARP cache</b>, so a request isn't needed for every packet.</p>
+</div>
+<div class="note-sec">
+  <h3><span class="num">4</span> Routed traffic &mdash; different subnets</h3>
+  <p class="muted" style="margin-top:0">Across subnets, traffic goes through the sender's <b>default gateway</b>. ARP resolves MACs <b>one hop at a time</b> &mdash; destination IP never changes, destination MAC changes each hop.</p>
+  <ol class="steps">
+    <li>Sender ARPs for its <b>default gateway</b> (172.23.4.254), not the final receiver.</li>
+    <li>Sender &rarr; Router: Dst IP = receiver, but Dst MAC = <b>router's</b> MAC.</li>
+    <li>Router ARPs for the receiver on the far subnet.</li>
+    <li>Router &rarr; Receiver: Dst IP = receiver, Dst MAC = <b>receiver's</b> MAC.</li>
+  </ol>
+  <div class="callout ok"><b>Key idea:</b> IP addressing = end-to-end &middot; MAC addressing = hop-by-hop.</div>
+</div>
+<div class="note-sec">
+  <h3><span class="num">5</span> Commands</h3>
+  <div class="grid2">
+    <div>
+      <p class="muted" style="margin-top:0"><b>Host ARP</b></p>
+      <table>
+        <tr><th></th><th>Windows</th><th>Linux</th></tr>
+        <tr><td>View</td><td><span class="cmd">arp -a</span></td><td><span class="cmd">arp -n</span></td></tr>
+        <tr><td>Clear</td><td><span class="cmd">netsh interface ip delete arpcache</span></td><td><span class="cmd">ip -s -s neigh flush all</span></td></tr>
+      </table>
+    </div>
+    <div>
+      <p class="muted" style="margin-top:0"><b>Router (Cisco IOS) &mdash; ARP</b></p>
+      <ul style="margin:0 0 8px;padding-left:18px;line-height:1.7">
+        <li>View: <span class="cmd">show arp</span></li>
+        <li>Clear: <span class="cmd">clear arp-cache</span></li>
+      </ul>
+    </div>
+  </div>
+  <p class="muted" style="margin-top:12px"><b>Router DNS client</b></p>
+  <ul style="margin:0;padding-left:18px;line-height:1.7">
+    <li><span class="cmd">ip domain-lookup</span> &mdash; enable name resolution</li>
+    <li><span class="cmd">ip name-server 172.23.4.1</span></li>
+    <li><span class="cmd">ip domain-name flackboxA.lab</span> &mdash; primary suffix</li>
+    <li><span class="cmd">ip domain-list flackboxB.lab</span> &mdash; extra suffixes</li>
+  </ul>
+  <p class="muted"><b>DNS server:</b> <span class="cmd">ip dns server</span> &middot; static record: <span class="cmd">ip host LinuxA 172.23.4.2</span></p>
+</div>
+<div class="note-sec">
+  <h3><span class="num">6</span> OSI layers &mdash; where this lives</h3>
+  <table>
+    <tr><th>#</th><th>Name</th><th>Includes</th><th>Devices</th></tr>
+    <tr><td>4</td><td>Transport</td><td>TCP / UDP, ports (DNS = UDP 53)</td><td></td></tr>
+    <tr class="hl"><td>3</td><td>Network</td><td>IP address (DNS resolves names &rarr; IP)</td><td>Routers</td></tr>
+    <tr class="hl"><td>2</td><td>Data-Link</td><td>Ethernet MAC (ARP resolves IP &rarr; MAC)</td><td>Switches</td></tr>
+    <tr><td>1</td><td>Physical</td><td></td><td></td></tr>
+  </table>
 </div>
 </div>
 </body>

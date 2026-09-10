@@ -3940,17 +3940,28 @@ async function load(){
     document.getElementById("exam").textContent = "Exam day: " + fmtLong(data.exam_date);
   }
 
+  // Group by real calendar week (Sunday start), derived from each row's date, so a
+  // Thursday always sits with its Sun-Thu week regardless of how many rows precede it.
+  function weekKey(dateStr) {
+    var d = new Date(dateStr + "T12:00:00");
+    d.setDate(d.getDate() - d.getDay());   // back up to Sunday
+    return d.toISOString().slice(0, 10);
+  }
   const byWeek = {};
-  days.forEach(function(d){ (byWeek[d.week] = byWeek[d.week] || []).push(d); });
+  const order = [];
+  days.forEach(function(d){
+    var k = weekKey(d.date);
+    if (!byWeek[k]) { byWeek[k] = []; order.push(k); }
+    byWeek[k].push(d);
+  });
 
   let h = "";
-  Object.keys(byWeek).sort(function(a,b){ return a - b; }).forEach(function(w){
-    const items = byWeek[w];
+  order.sort().forEach(function(k, idx){
+    const items = byWeek[k];
     const allDone = items.every(function(i){ return i.done; });
-    let label = "Week " + w;
-    if (w === "9") label += " &mdash; review";
-    if (w === "10") label += " &mdash; exam";
+    let label = "Week " + (idx + 1);
     if (allDone) label += " &check;";
+    // Range = the week's Sunday through its last scheduled day.
     const range = items.length
       ? ' <span class="wk">' + fmtShort(items[0].date) + " &ndash; " + fmtShort(items[items.length-1].date) + "</span>"
       : "";

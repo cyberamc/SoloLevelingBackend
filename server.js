@@ -2031,10 +2031,15 @@ function seedBillsFromPreviousMonth(newMonthId, newMonthStr) {
   if (!prev) return;
   const srcBills = db.prepare("SELECT * FROM bookkeeping_bills WHERE month_id = ? ORDER BY sort_order").all(prev.id);
   const insert = db.prepare(
-    "INSERT INTO bookkeeping_bills (month_id, group_name, name, amount, status, sort_order, autopay) VALUES (?, ?, ?, ?, 'NOT PAID', ?, ?)"
+    "INSERT INTO bookkeeping_bills (month_id, group_name, name, amount, status, sort_order, autopay) VALUES (?, ?, ?, ?, ?, ?, ?)"
   );
   const tx = db.transaction(() => {
-    srcBills.forEach(b => insert.run(newMonthId, b.group_name, b.name, b.amount, b.sort_order, b.autopay ? 1 : 0));
+    srcBills.forEach(b => {
+      // Loans default to ON HOLD (they don't count against remaining bills); everything
+      // else starts NOT PAID.
+      const status = b.name.trim().toLowerCase().startsWith("loan") ? "ON HOLD" : "NOT PAID";
+      insert.run(newMonthId, b.group_name, b.name, b.amount, status, b.sort_order, b.autopay ? 1 : 0);
+    });
   });
   tx();
 }

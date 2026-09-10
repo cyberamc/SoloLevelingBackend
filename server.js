@@ -3458,6 +3458,10 @@ app.get("/notes", requireAuth, (req, res) => {
   .nav { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 22px; }
   .nav-item { background: #12122a; border: 1px solid #2a2a3a; border-radius: 8px; color: #9fb0d8; font-size: 13px; padding: 8px 12px; text-decoration: none; }
   .nav-item:hover { border-color: #4a6cae; color: #cfe0ff; }
+  .nav-item { cursor: pointer; font-family: inherit; }
+  .nav-item.active { background: #2a3a5c; border-color: #4a6cae; color: #cfe0ff; font-weight: 600; }
+  .note-card { display: none; }
+  .note-card.shown { display: block; }
   .note-card { background: #10101f; border: 1px solid #23233a; border-radius: 10px; overflow: hidden; margin-bottom: 20px; scroll-margin-top: 16px; }
   .note-head { background: #14213a; padding: 16px 20px; }
   .note-head h2 { color: #fff; font-size: 18px; }
@@ -3501,8 +3505,8 @@ app.get("/notes", requireAuth, (req, res) => {
 <body>
 <h1>CCNA Notes</h1>
 <div class="subtitle">Study reference</div>
-<div class="nav"><a class="nav-item" href="#subnetting">Subnetting & IP Addressing</a><a class="nav-item" href="#dns-arp">DNS &amp; ARP</a></div>
-<div class="note-card" id="subnetting"><div class="note-head"><h2>Subnetting & IP Addressing</h2><div class="note-sub">network bits vs host bits · IPv4 (32 bits)</div></div>
+<div class="nav"><button class="nav-item active" data-target="subnetting">Subnetting & IP Addressing</button><button class="nav-item" data-target="dns-arp">DNS &amp; ARP</button></div>
+<div class="note-card shown" id="subnetting"><div class="note-head"><h2>Subnetting & IP Addressing</h2><div class="note-sub">network bits vs host bits · IPv4 (32 bits)</div></div>
 <div class="note-sec">
   <h3><span class="num">1</span> The two formulas</h3>
   <div class="grid2">
@@ -3751,6 +3755,18 @@ Boston Eng: 200.15.10.<span class="blue-t">32</span> – <span class="amber-t">6
   </table>
 </div>
 </div>
+<script>
+  var navBtns = document.querySelectorAll(".nav-item");
+  var cards = document.querySelectorAll(".note-card");
+  navBtns.forEach(function(b){
+    b.addEventListener("click", function(){
+      var target = b.getAttribute("data-target");
+      navBtns.forEach(function(x){ x.classList.toggle("active", x === b); });
+      cards.forEach(function(card){ card.classList.toggle("shown", card.id === target); });
+      window.scrollTo(0, 0);
+    });
+  });
+</script>
 </body>
 </html>`);
 });

@@ -3501,7 +3501,7 @@ app.get("/notes", requireAuth, (req, res) => {
   body { background: #0a0a1a; color: #cfd4e0; font-family: -apple-system, sans-serif; line-height: 1.5; padding: 20px 16px 60px; max-width: 900px; margin: 0 auto; }
   h1 { color: #fff; font-size: 24px; }
   .subtitle { color: #7a8090; font-size: 13px; margin: 4px 0 16px; }
-  .nav { display: flex; gap: 8px; margin-bottom: 22px; overflow-x: auto; padding-bottom: 4px; -webkit-overflow-scrolling: touch; }
+  .nav { display: flex; gap: 8px; margin-bottom: 22px; flex-wrap: wrap; }
   .nav-item { background: #12122a; border: 1px solid #2a2a3a; border-radius: 8px; color: #9fb0d8; font-size: 13px; padding: 8px 12px; text-decoration: none; cursor: pointer; font-family: inherit; white-space: nowrap; flex: none; }
   .nav-item:hover { border-color: #4a6cae; color: #cfe0ff; }
   .nav-item.active { background: #2a3a5c; border-color: #4a6cae; color: #cfe0ff; font-weight: 600; }

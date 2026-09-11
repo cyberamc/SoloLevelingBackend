@@ -3462,7 +3462,34 @@ ${reasons}
 });
 
 // ─── CCNA study plan page ─────────────────────────────────────────────────────
+// ─── CCNA notes (DB-backed, tabbed) ───────────────────────────────────────────
+function initCcnaNotes() {
+  db.prepare(`
+    CREATE TABLE IF NOT EXISTS ccna_notes (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      note_id TEXT UNIQUE NOT NULL,
+      title TEXT NOT NULL,
+      subtitle TEXT,
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      body TEXT NOT NULL
+    )
+  `).run();
+}
+initCcnaNotes();
+
 app.get("/notes", requireAuth, (req, res) => {
+  const notes = db.prepare("SELECT * FROM ccna_notes ORDER BY sort_order, id").all();
+  const nav = notes.map((n, i) =>
+    '<button class="nav-item' + (i === 0 ? ' active' : '') + '" data-target="' + n.note_id + '">' + n.title + '</button>'
+  ).join("");
+  const cards = notes.map((n, i) =>
+    '<div class="note-card' + (i === 0 ? ' shown' : '') + '" id="' + n.note_id + '">' +
+    '<div class="note-head"><h2>' + n.title + '</h2>' +
+    (n.subtitle ? '<div class="note-sub">' + n.subtitle + '</div>' : '') + '</div>' +
+    n.body + '</div>'
+  ).join("");
+  const empty = notes.length ? '' : '<p style="color:#666;padding:20px 0">No notes yet.</p>';
+
   res.send(`<!DOCTYPE html>
 <html>
 <head>
@@ -3474,14 +3501,12 @@ app.get("/notes", requireAuth, (req, res) => {
   body { background: #0a0a1a; color: #cfd4e0; font-family: -apple-system, sans-serif; line-height: 1.5; padding: 20px 16px 60px; max-width: 900px; margin: 0 auto; }
   h1 { color: #fff; font-size: 24px; }
   .subtitle { color: #7a8090; font-size: 13px; margin: 4px 0 16px; }
-  .nav { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 22px; }
-  .nav-item { background: #12122a; border: 1px solid #2a2a3a; border-radius: 8px; color: #9fb0d8; font-size: 13px; padding: 8px 12px; text-decoration: none; }
+  .nav { display: flex; gap: 8px; margin-bottom: 22px; overflow-x: auto; padding-bottom: 4px; -webkit-overflow-scrolling: touch; }
+  .nav-item { background: #12122a; border: 1px solid #2a2a3a; border-radius: 8px; color: #9fb0d8; font-size: 13px; padding: 8px 12px; text-decoration: none; cursor: pointer; font-family: inherit; white-space: nowrap; flex: none; }
   .nav-item:hover { border-color: #4a6cae; color: #cfe0ff; }
-  .nav-item { cursor: pointer; font-family: inherit; }
   .nav-item.active { background: #2a3a5c; border-color: #4a6cae; color: #cfe0ff; font-weight: 600; }
-  .note-card { display: none; }
+  .note-card { background: #10101f; border: 1px solid #23233a; border-radius: 10px; overflow: hidden; margin-bottom: 20px; display: none; }
   .note-card.shown { display: block; }
-  .note-card { background: #10101f; border: 1px solid #23233a; border-radius: 10px; overflow: hidden; margin-bottom: 20px; scroll-margin-top: 16px; }
   .note-head { background: #14213a; padding: 16px 20px; }
   .note-head h2 { color: #fff; font-size: 18px; }
   .note-sub { color: #8ca3c8; font-size: 12px; margin-top: 3px; }
@@ -3503,7 +3528,11 @@ app.get("/notes", requireAuth, (req, res) => {
   table { width: 100%; border-collapse: collapse; font-size: 13px; margin: 6px 0; }
   th, td { border: 1px solid #23233a; padding: 8px 10px; text-align: left; }
   th { background: #14213a; color: #cfe0ff; font-weight: 600; }
-  .mono, td code { font-family: Consolas, monospace; }
+  .mono, td code, .cmd { font-family: Consolas, monospace; }
+  .cmd { background: #0a0f18; border: 1px solid #23233a; border-radius: 3px; padding: 1px 5px; font-size: 12px; color: #a9c4e6; }
+  tr.hl td { background: #14213a; }
+  .flow { background: #0d1420; border: 1px solid #23233a; border-radius: 6px; padding: 10px 12px; font-size: 13px; margin-top: 6px; line-height: 1.7; }
+  .flow b { color: #8fd6a8; }
   ol.steps { list-style: none; counter-reset: s; }
   ol.steps li { counter-increment: s; position: relative; padding: 8px 0 8px 38px; border-bottom: 1px dashed #23233a; }
   ol.steps li:last-child { border-bottom: none; }
@@ -3511,10 +3540,6 @@ app.get("/notes", requireAuth, (req, res) => {
   .worked { background: #0d1420; border-left: 4px solid #4a6cae; border-radius: 0 8px 8px 0; padding: 12px 14px; margin-top: 12px; font-size: 13px; }
   .worked .mono { background: #14213a; padding: 1px 5px; border-radius: 4px; }
   .binbox { font-family: Consolas, monospace; font-size: 13px; background: #0a0f18; border: 1px solid #23233a; border-radius: 6px; padding: 10px 12px; margin-top: 8px; white-space: pre; overflow-x: auto; }
-  .cmd { font-family: Consolas, monospace; background: #0a0f18; border: 1px solid #23233a; border-radius: 3px; padding: 1px 5px; font-size: 12px; color: #a9c4e6; }
-  tr.hl td { background: #14213a; }
-  .flow { background: #0d1420; border: 1px solid #23233a; border-radius: 6px; padding: 10px 12px; font-size: 13px; margin-top: 6px; line-height: 1.7; }
-  .flow b { color: #8fd6a8; }
   .blue-t { color: #7b9cd8; font-weight: 700; }
   .amber-t { color: #e0a458; font-weight: 700; }
   .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
@@ -3524,256 +3549,8 @@ app.get("/notes", requireAuth, (req, res) => {
 <body>
 <h1>CCNA Notes</h1>
 <div class="subtitle">Study reference</div>
-<div class="nav"><button class="nav-item active" data-target="subnetting">Subnetting & IP Addressing</button><button class="nav-item" data-target="dns-arp">DNS &amp; ARP</button></div>
-<div class="note-card shown" id="subnetting"><div class="note-head"><h2>Subnetting & IP Addressing</h2><div class="note-sub">network bits vs host bits · IPv4 (32 bits)</div></div>
-<div class="note-sec">
-  <h3><span class="num">1</span> The two formulas</h3>
-  <div class="grid2">
-    <div>
-      <div class="formula">Subnets = <b>2<sup>borrowed bits</sup></b></div>
-      <p class="muted"><b>Borrowed bits</b> = prefix − class default (/8, /16, or /24). No "−2".</p>
-    </div>
-    <div>
-      <div class="formula">Hosts = <span class="amber">2<sup>host bits</sup> − 2</span></div>
-      <p class="muted"><b>Host bits</b> = 32 − prefix. Subtract 2 for network + broadcast.</p>
-    </div>
-  </div>
-  <div class="keyrow">
-    <span class="pill blue">host bits = 32 − prefix</span>
-    <span class="pill blue">borrowed = prefix − class default</span>
-    <span class="pill amber">only HOSTS get the −2</span>
-  </div>
-  <div class="callout warn"><b>Exceptions to −2:</b> /31 = 2 hosts (point-to-point, no network/broadcast) and /32 = 1 host. Every other mask uses 2<sup>n</sup> − 2.</div>
-</div>
-
-<div class="note-sec">
-  <h3><span class="num">2</span> Network, broadcast &amp; host range — block-size method</h3>
-  <ol class="steps">
-    <li><b>Block size = 256 − mask octet.</b> (/26 → 192, so 256 − 192 = <b>64</b>.)</li>
-    <li><b>Count up in that block size</b> (0, 64, 128, 192…) until you pass the host's octet — that's the block it lives in.</li>
-    <li><b>Network address</b> = bottom of the block <span class="pill amber">host bits all 0</span></li>
-    <li><b>Broadcast address</b> = top of the block (next block − 1) <span class="pill amber">host bits all 1</span></li>
-    <li><b>Valid hosts</b> = network + 1 → broadcast − 1</li>
-  </ol>
-  <div class="worked">
-    <b>Worked example — 198.22.45.173 /26</b><br>
-    Block size = 256 − 192 = <span class="mono">64</span> → blocks: .0, .64, .128, .192<br>
-    .173 falls in the <span class="mono">.128</span> block:
-    <div class="binbox">Network    : 198.22.45.<span class="blue-t">128</span>
-First host : 198.22.45.129
-Last host  : 198.22.45.190
-Broadcast  : 198.22.45.<span class="amber-t">191</span></div>
-    Check: 62 usable hosts (2<sup>6</sup> − 2)
-  </div>
-  <div class="callout ok"><b>Binary view:</b> the network address zeros out the host bits and keeps the network bits; broadcast sets the host bits to all 1s.</div>
-</div>
-
-<div class="note-sec">
-  <h3><span class="num">3</span> Address class by first octet</h3>
-  <table>
-    <tr><th>Class</th><th>First octet</th><th>Leading bits</th><th>Default mask</th><th>Purpose</th></tr>
-    <tr><td>A</td><td>1 – 126</td><td class="mono">0…</td><td>/8 (255.0.0.0)</td><td>very large networks</td></tr>
-    <tr><td>B</td><td>128 – 191</td><td class="mono">10…</td><td>/16 (255.255.0.0)</td><td>medium/large</td></tr>
-    <tr><td>C</td><td>192 – 223</td><td class="mono">110…</td><td>/24 (255.255.255.0)</td><td>small networks</td></tr>
-    <tr><td>D</td><td>224 – 239</td><td class="mono">1110</td><td>—</td><td>multicast</td></tr>
-    <tr><td>E</td><td>240 – 255</td><td class="mono">1111</td><td>—</td><td>experimental/reserved</td></tr>
-  </table>
-  <p class="muted"><b>127</b> = loopback (127.0.0.1 = localhost). <b>0.0.0.0/8</b> = "this network". Each class turns on the next bit, so ranges start at 128, 192, 224, 240.</p>
-</div>
-
-<div class="note-sec">
-  <h3><span class="num">4</span> Subnet mask octet values (fill from the left)</h3>
-  <table>
-    <tr><th>Bits on</th><td>1</td><td>2</td><td>3</td><td>4</td><td>5</td><td>6</td><td>7</td><td>8</td></tr>
-    <tr><th>Mask value</th><td>128</td><td>192</td><td>224</td><td>240</td><td>248</td><td>252</td><td>254</td><td>255</td></tr>
-    <tr><th>Block size</th><td>128</td><td>64</td><td>32</td><td>16</td><td>8</td><td>4</td><td>2</td><td>1</td></tr>
-  </table>
-  <p class="muted">Valid mask octets are only: 0, 128, 192, 224, 240, 248, 252, 254, 255. Block size = 256 − mask value.</p>
-</div>
-
-<div class="note-sec">
-  <h3><span class="num">5</span> Class C subnet quick-reference</h3>
-  <table>
-    <tr><th>Prefix</th><th>Mask</th><th>Block</th><th>Subnets</th><th>Hosts / subnet</th></tr>
-    <tr><td>/24</td><td>255.255.255.0</td><td>256</td><td>1</td><td>254</td></tr>
-    <tr><td>/25</td><td>255.255.255.128</td><td>128</td><td>2</td><td>126</td></tr>
-    <tr><td>/26</td><td>255.255.255.192</td><td>64</td><td>4</td><td>62</td></tr>
-    <tr><td>/27</td><td>255.255.255.224</td><td>32</td><td>8</td><td>30</td></tr>
-    <tr><td>/28</td><td>255.255.255.240</td><td>16</td><td>16</td><td>14</td></tr>
-    <tr><td>/29</td><td>255.255.255.248</td><td>8</td><td>32</td><td>6</td></tr>
-    <tr><td>/30</td><td>255.255.255.252</td><td>4</td><td>64</td><td>2</td></tr>
-    <tr><td>/31</td><td>255.255.255.254</td><td>2</td><td>128</td><td>2 <span class="pill amber">P2P only</span></td></tr>
-  </table>
-  <p class="muted"><b>/30 vs /31:</b> both give 2 hosts for router links. Use /30 on the exam unless told to use /31.</p>
-</div>
-
-<div class="note-sec">
-  <h3><span class="num">6</span> Other things worth remembering</h3>
-  <table>
-    <tr><th>Concept</th><th>Key point</th></tr>
-    <tr><td>Private ranges</td><td class="mono">10.0.0.0–10.255.255.255 · 172.16.0.0–172.31.255.255 · 192.168.0.0–192.168.255.255</td></tr>
-    <tr><td>Private size order</td><td>10.x biggest (~16.7M) &gt; 172.16–31 (~1M) &gt; 192.168 (~65K). Fewer octets locked = bigger.</td></tr>
-    <tr><td>CIDR</td><td>Classless — mask carried as /prefix, any boundary. Fixes class waste.</td></tr>
-    <tr><td>Route summarisation</td><td>Collapse routes sharing leading bits into one broader route. Smaller tables.</td></tr>
-    <tr><td>VLSM</td><td>Variable Length Subnet Masking — size subnets by host need (vs equal FLSM).</td></tr>
-    <tr><td>Network address</td><td>First address, host bits all 0 — names the subnet, not assignable.</td></tr>
-    <tr><td>Broadcast address</td><td>Last address, host bits all 1 — hits all hosts, not assignable.</td></tr>
-    <tr><td>ip subnet-zero</td><td>On by default — all subnets usable (old "subtract 2 for subnets" rule gone).</td></tr>
-    <tr><td>Different subnets</td><td>Hosts on different subnets must go through a router to talk.</td></tr>
-  </table>
-</div>
-<div class="note-sec">
-  <h3><span class="num">7</span> The two subnetting question types</h3>
-  <p class="muted" style="margin-top:0">Almost every exam question is one of these two. Figure out which you're handed, then run the matching direction.</p>
-  <table>
-    <tr><th>You're given…</th><th>You're asked for…</th><th>Direction</th></tr>
-    <tr><td>An IP + mask/prefix</td><td>network addr, broadcast, host range</td><td>block-size method (§2)</td></tr>
-    <tr><td>A need: x subnets and/or y hosts</td><td>the subnet mask to use</td><td>work the formulas backward</td></tr>
-  </table>
-  <div class="callout ok" style="margin-top:16px">
-    <b>Backward from a requirement → mask</b>
-    <ol class="steps" style="margin-top:8px">
-      <li><b>Find the class</b> of the address → gives the default prefix (/8, /16, /24).</li>
-      <li><b>Need x subnets?</b> smallest borrowed bits where <span class="mono">2ⁿ ≥ x</span>. Then prefix = default + n.</li>
-      <li><b>Need y hosts?</b> smallest host bits where <span class="mono">2ⁿ − 2 ≥ y</span>. Then prefix = 32 − n.</li>
-      <li>Convert the prefix to dotted decimal if asked.</li>
-    </ol>
-  </div>
-  <div class="worked">
-    <b>Example — subnet 134.65.0.0 into 6 networks</b><br>
-    134 → Class B → default <span class="mono">/16</span>.<br>
-    6 subnets → smallest 2ⁿ ≥ 6 is 2³ = 8 → borrow <span class="mono">3</span> bits.<br>
-    Prefix = 16 + 3 = <b>/19</b> = <b>255.255.224.0</b> (third octet: 128+64+32 = 224).
-  </div>
-  <div class="callout warn">
-    <b>Watch the round-up:</b> bits are whole numbers. If the count isn't an exact power of 2, round <b>up</b> (6 subnets → 8). Spares go to future growth.<br><br>
-    <b>Watch the class:</b> always borrow from the <b>class default</b>, not /24 by habit. First octet tells you which (60→A, 134→B, 200→C).
-  </div>
-</div>
-
-<div class="note-sec">
-  <h3><span class="num">8</span> VLSM design — sizing a whole network</h3>
-  <p class="muted" style="margin-top:0">When one block must be carved into segments of <em>different</em> sizes, right-size each one instead of forcing them equal.</p>
-  <ol class="steps">
-    <li><b>List every segment and its host count.</b> Don't forget point-to-point links (2 hosts) — and router interfaces count as hosts.</li>
-    <li><b>Sort largest → smallest.</b> Always handle the biggest first.</li>
-    <li><b>Size each one:</b> smallest subnet where <span class="mono">2ⁿ − 2 ≥ hosts needed</span>.</li>
-    <li><b>Allocate from the start</b> of the address space, then continue down. Each subnet's block size sets where the next begins.</li>
-  </ol>
-  <div class="worked">
-    <b>Example — 200.15.10.0/24, Engineering = 28 hosts</b><br>
-    28 + 2 reserved = 30 needed → smallest block holding 30 is <b>32</b> → <b>/27</b> (30 usable). Allocate from the start:
-    <div class="binbox">NY Eng    : 200.15.10.<span class="blue-t">0</span>  – <span class="amber-t">31</span>   (/27, hosts .1–.30)
-Boston Eng: 200.15.10.<span class="blue-t">32</span> – <span class="amber-t">63</span>   (/27, hosts .33–.62)</div>
-    Next-largest (Sales 14) takes /28, the P2P link /30, etc.
-  </div>
-  <div class="callout ok">
-    <b>"Suitable size" = tightest fit.</b> Just big enough, never bigger. 28 hosts → /27 (30), not /26 (62, wasteful) or /28 (14, too small). Do <b>exactly</b> what the question asks.
-  </div>
-</div>
-
-<div class="note-sec">
-  <h3><span class="num">9</span> Reverse-lookup cheat lines (need → bits)</h3>
-  <div class="grid2">
-    <div>
-      <p class="muted" style="margin-top:0"><b>Subnets needed → borrow bits</b></p>
-      <table>
-        <tr><th>Need ≤</th><th>Borrow</th></tr>
-        <tr><td>2</td><td>1</td></tr><tr><td>4</td><td>2</td></tr><tr><td>8</td><td>3</td></tr>
-        <tr><td>16</td><td>4</td></tr><tr><td>32</td><td>5</td></tr><tr><td>64</td><td>6</td></tr>
-      </table>
-    </div>
-    <div>
-      <p class="muted" style="margin-top:0"><b>Hosts needed → host bits (2ⁿ−2)</b></p>
-      <table>
-        <tr><th>Need ≤</th><th>Host bits</th><th>Prefix</th></tr>
-        <tr><td>2</td><td>2</td><td>/30</td></tr><tr><td>6</td><td>3</td><td>/29</td></tr>
-        <tr><td>14</td><td>4</td><td>/28</td></tr><tr><td>30</td><td>5</td><td>/27</td></tr>
-        <tr><td>62</td><td>6</td><td>/26</td></tr><tr><td>126</td><td>7</td><td>/25</td></tr>
-      </table>
-    </div>
-  </div>
-  <p class="muted">Read down to the first row that covers your requirement. Prefix column assumes a Class C base; other classes use identical host math, only the subnets side shifts with the class default.</p>
-</div>
-</div>
-
-<div class="note-card" id="dns-arp"><div class="note-head"><h2>DNS &amp; ARP</h2><div class="note-sub">IP-to-name (DNS) and IP-to-MAC (ARP) resolution</div></div>
-<div class="note-sec">
-  <h3><span class="num">1</span> Two resolution steps</h3>
-  <p class="muted" style="margin-top:0">To build a packet, the sender needs the receiver's <b>IP address</b> and <b>MAC address</b>.</p>
-  <div class="keyrow">
-    <span class="pill blue">DNS: name (FQDN) &rarr; IP</span>
-    <span class="pill amber">ARP: IP &rarr; MAC</span>
-  </div>
-  <p class="muted">You may point the sender directly at an IP, or at an FQDN that DNS resolves first.</p>
-</div>
-<div class="note-sec">
-  <h3><span class="num">2</span> DNS &nbsp;<span class="pill blue">UDP 53</span></h3>
-  <ul style="margin:0;padding-left:18px;line-height:1.7">
-    <li>Resolves an <b>FQDN</b> (e.g. <span class="cmd">www.cisco.com</span>) to an IP address.</li>
-    <li>Enterprises run an <b>internal DNS server</b> that resolves internal hosts; clients query it.</li>
-    <li>If it can't resolve, it <b>forwards</b> to public DNS servers on the Internet.</li>
-    <li>Uses <b>UDP port 53</b> &mdash; can fail over to <b>TCP</b>.</li>
-  </ul>
-</div>
-<div class="note-sec">
-  <h3><span class="num">3</span> ARP &mdash; how it works &nbsp;<span class="pill amber">same subnet</span></h3>
-  <div class="flow">
-    <b>Request &rarr;</b> broadcast: "Who has <span class="cmd">172.23.4.2</span>? What's your MAC?" &middot; Src MAC = sender &middot; Dst MAC = <span class="cmd">FFFF.FFFF.FFFF</span><br>
-    <b>&larr; Reply</b> unicast: "I'm 172.23.4.2, here's my MAC." &middot; Src MAC = target &middot; Dst MAC = sender
-  </div>
-  <p class="muted">Replies are cached in the host's <b>ARP cache</b>, so a request isn't needed for every packet.</p>
-</div>
-<div class="note-sec">
-  <h3><span class="num">4</span> Routed traffic &mdash; different subnets</h3>
-  <p class="muted" style="margin-top:0">Across subnets, traffic goes through the sender's <b>default gateway</b>. ARP resolves MACs <b>one hop at a time</b> &mdash; destination IP never changes, destination MAC changes each hop.</p>
-  <ol class="steps">
-    <li>Sender ARPs for its <b>default gateway</b> (172.23.4.254), not the final receiver.</li>
-    <li>Sender &rarr; Router: Dst IP = receiver, but Dst MAC = <b>router's</b> MAC.</li>
-    <li>Router ARPs for the receiver on the far subnet.</li>
-    <li>Router &rarr; Receiver: Dst IP = receiver, Dst MAC = <b>receiver's</b> MAC.</li>
-  </ol>
-  <div class="callout ok"><b>Key idea:</b> IP addressing = end-to-end &middot; MAC addressing = hop-by-hop.</div>
-</div>
-<div class="note-sec">
-  <h3><span class="num">5</span> Commands</h3>
-  <div class="grid2">
-    <div>
-      <p class="muted" style="margin-top:0"><b>Host ARP</b></p>
-      <table>
-        <tr><th></th><th>Windows</th><th>Linux</th></tr>
-        <tr><td>View</td><td><span class="cmd">arp -a</span></td><td><span class="cmd">arp -n</span></td></tr>
-        <tr><td>Clear</td><td><span class="cmd">netsh interface ip delete arpcache</span></td><td><span class="cmd">ip -s -s neigh flush all</span></td></tr>
-      </table>
-    </div>
-    <div>
-      <p class="muted" style="margin-top:0"><b>Router (Cisco IOS) &mdash; ARP</b></p>
-      <ul style="margin:0 0 8px;padding-left:18px;line-height:1.7">
-        <li>View: <span class="cmd">show arp</span></li>
-        <li>Clear: <span class="cmd">clear arp-cache</span></li>
-      </ul>
-    </div>
-  </div>
-  <p class="muted" style="margin-top:12px"><b>Router DNS client</b></p>
-  <ul style="margin:0;padding-left:18px;line-height:1.7">
-    <li><span class="cmd">ip domain-lookup</span> &mdash; enable name resolution</li>
-    <li><span class="cmd">ip name-server 172.23.4.1</span></li>
-    <li><span class="cmd">ip domain-name flackboxA.lab</span> &mdash; primary suffix</li>
-    <li><span class="cmd">ip domain-list flackboxB.lab</span> &mdash; extra suffixes</li>
-  </ul>
-  <p class="muted"><b>DNS server:</b> <span class="cmd">ip dns server</span> &middot; static record: <span class="cmd">ip host LinuxA 172.23.4.2</span></p>
-</div>
-<div class="note-sec">
-  <h3><span class="num">6</span> OSI layers &mdash; where this lives</h3>
-  <table>
-    <tr><th>#</th><th>Name</th><th>Includes</th><th>Devices</th></tr>
-    <tr><td>4</td><td>Transport</td><td>TCP / UDP, ports (DNS = UDP 53)</td><td></td></tr>
-    <tr class="hl"><td>3</td><td>Network</td><td>IP address (DNS resolves names &rarr; IP)</td><td>Routers</td></tr>
-    <tr class="hl"><td>2</td><td>Data-Link</td><td>Ethernet MAC (ARP resolves IP &rarr; MAC)</td><td>Switches</td></tr>
-    <tr><td>1</td><td>Physical</td><td></td><td></td></tr>
-  </table>
-</div>
-</div>
+<div class="nav">${nav}</div>
+${cards}${empty}
 <script>
   var navBtns = document.querySelectorAll(".nav-item");
   var cards = document.querySelectorAll(".note-card");
@@ -3789,6 +3566,7 @@ Boston Eng: 200.15.10.<span class="blue-t">32</span> – <span class="amber-t">6
 </body>
 </html>`);
 });
+
 
 app.get("/delivery-history", requireAuth, (req, res) => {
   // Reuse the JSON builder by calling the same query logic inline.

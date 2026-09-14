@@ -3885,6 +3885,16 @@ app.get("/routine", requireAuth, (req, res) => {
   const gymItems = buildList('gym');
   const restItems = buildList('rest');
   const deliveryItems = buildList('delivery');
+
+  // CCNA study timeline per weekday (Sun-Thu = 0-4), from ccna_schedule.
+  const ccnaDayNames = ["Sunday","Monday","Tuesday","Wednesday","Thursday"];
+  const ccnaCols = [0,1,2,3,4].map(wd => {
+    const rows = db.prepare("SELECT title FROM ccna_schedule WHERE weekday = ? ORDER BY sort_order").all(wd);
+    return { name: ccnaDayNames[wd], items: rows.map(r => `<li>${esc(r.title)}</li>`).join("") };
+  }).filter(col => col.items.length > 0);
+  const ccnaHtml = ccnaCols.map(col =>
+    `<div class="column"><div class="col-head">${col.name}</div><div class="card"><ol>${col.items}</ol></div></div>`
+  ).join("");
   const html = `<!DOCTYPE html>
 <html>
 <head>
@@ -3924,6 +3934,11 @@ app.get("/routine", requireAuth, (req, res) => {
     <div class="card"><ol>${deliveryItems}</ol></div>
   </div>
 </div>
+
+<h1 style="margin-top:36px">CCNA Study Schedule</h1>
+<div class="subtitle">Daily study timeline (Sun&ndash;Thu). Reference only.</div>
+<div class="columns">${ccnaHtml}</div>
+
 </body>
 </html>`;
   res.send(html);

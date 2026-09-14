@@ -3992,6 +3992,10 @@ function initReminders() {
   if (!rrCols.includes('nth_weekday')) {
     db.prepare("ALTER TABLE recurring_reminders ADD COLUMN nth_weekday INTEGER").run();
   }
+  // Which occurrence of that weekday in the month (1=first ... 5). Defaults to 1.
+  if (!rrCols.includes('nth_occurrence')) {
+    db.prepare("ALTER TABLE recurring_reminders ADD COLUMN nth_occurrence INTEGER NOT NULL DEFAULT 1").run();
+  }
 }
 initReminders();
 
@@ -4033,9 +4037,14 @@ function nextOccurrence(rule, from) {
       if (interval > 1 && (((monthIndex - anchor) % interval + interval) % interval !== 0)) continue;
       let day;
       if (nth != null) {
-        // First occurrence of weekday `nth` in this month.
+        // Nth occurrence of weekday `nth` in this month (occ 1 = first).
+        const occ = (rule.nth_occurrence && rule.nth_occurrence >= 1) ? rule.nth_occurrence : 1;
         const firstDow = new Date(y, m, 1).getDay();
-        day = 1 + ((nth - firstDow + 7) % 7);
+        const firstDay = 1 + ((nth - firstDow + 7) % 7);
+        const candidate = firstDay + (occ - 1) * 7;
+        const lastDay = new Date(y, m + 1, 0).getDate();
+        if (candidate > lastDay) continue;  // e.g. no 5th Saturday this month
+        day = candidate;
       } else {
         const lastDay = new Date(y, m + 1, 0).getDate();
         day = Math.min(dom, lastDay);
@@ -4114,6 +4123,7 @@ app.post("/api/recurring-reminders", (req, res) => {
   let weekdays = null;
   let dayOfMonth = null;
   let nthWeekday = null;
+  let nthOccurrence = 1;
   let intervalMonths = 1;
   let anchorMonth = 0;
   if (type === "weekly") {
@@ -4128,6 +4138,10 @@ app.post("/api/recurring-reminders", (req, res) => {
     if (nthWeekday != null) {
       if (!(nthWeekday >= 0 && nthWeekday <= 6)) {
         return res.status(400).json({ error: "nth_weekday must be 0-6" });
+      }
+      nthOccurrence = (b.nth_occurrence != null && b.nth_occurrence !== "") ? parseInt(b.nth_occurrence, 10) : 1;
+      if (!(nthOccurrence >= 1 && nthOccurrence <= 5)) {
+        return res.status(400).json({ error: "nth_occurrence must be 1-5" });
       }
     } else {
       dayOfMonth = parseInt(b.day_of_month, 10);
@@ -4145,8 +4159,8 @@ app.post("/api/recurring-reminders", (req, res) => {
     }
   }
   const info = db.prepare(
-    "INSERT INTO recurring_reminders (title, type, time_str, weekdays, day_of_month, nth_weekday, interval_months, anchor_month) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
-  ).run(title, type, time, weekdays, dayOfMonth, nthWeekday, intervalMonths, anchorMonth);
+    "INSERT INTO recurring_reminders (title, type, time_str, weekdays, day_of_month, nth_weekday, nth_occurrence, interval_months, anchor_month) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+  ).run(title, type, time, weekdays, dayOfMonth, nthWeekday, nthOccurrence, intervalMonths, anchorMonth);
   materializeRecurringReminders();
   res.json({ success: true, id: info.lastInsertRowid });
 });

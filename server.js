@@ -141,8 +141,13 @@ function generateDailyQuests() {
     const dayResult = db.prepare("SELECT CAST(strftime('%w', ?) AS INTEGER) as dayOfWeek").get(today);
     const dayOfWeek = dayResult.dayOfWeek;
     const isDeliveryDay = dayOfWeek === 2 || dayOfWeek === 3;
+    const dayOff = isFourthSaturday(today);
     let templates;
-    if (isDeliveryDay) {
+    if (dayOff) {
+      // Day Off templates are stored with weekday = 7 so the normal weekday match never
+      // picks them; they fire only on the 4th Saturday, replacing Saturday's dailies.
+      templates = db.prepare("SELECT * FROM daily_quest_templates WHERE weekday = 7 AND time IS NOT NULL").all();
+    } else if (isDeliveryDay) {
       templates = db.prepare("SELECT * FROM daily_quest_templates WHERE (tuesday_time IS NOT NULL OR wednesday_time IS NOT NULL) AND time IS NULL").all();
     } else {
       templates = db.prepare("SELECT * FROM daily_quest_templates WHERE time IS NOT NULL AND tuesday_time IS NULL AND wednesday_time IS NULL AND weekday = ?").all(dayOfWeek);
@@ -1824,6 +1829,14 @@ app.get("/api/ccna-schedule", (req, res) => {
 // Today's routine section: WFM = Sun-Thu (weekday 0-4), Delivery = Fri/Sat (5-6).
 // Sun(0) & Wed(3) are rest days (plasma, no gym); Mon(1), Tue(2), Thu(4) are gym
 // days; Fri(5) & Sat(6) are delivery days.
+// True when the given YYYY-MM-DD is the 4th Saturday of its month.
+function isFourthSaturday(dateStr) {
+  const d = new Date(dateStr + "T12:00:00");
+  if (d.getDay() !== 6) return false;               // not a Saturday
+  const dom = d.getDate();
+  return dom >= 22 && dom <= 28;                     // the 4th Saturday always falls 22-28
+}
+
 function routineSectionForWeekday(wd) {
   if (wd === 5 || wd === 6) return 'delivery';
   if (wd === 0 || wd === 3) return 'rest';
@@ -1831,13 +1844,16 @@ function routineSectionForWeekday(wd) {
 }
 
 function routineSectionForToday() {
+  const today = db.prepare("SELECT date('now','localtime') AS d").get().d;
+  if (isFourthSaturday(today)) return 'dayoff';     // 4th Saturday overrides delivery
   return routineSectionForWeekday(new Date().getDay());
 }
 
 const ROUTINE_SECTION_LABELS = {
   gym: 'Gym Day',
   rest: 'Rest Day',
-  delivery: 'Delivery Day'
+  delivery: 'Delivery Day',
+  dayoff: 'Day Off'
 };
 
 // GET /api/routine-reference — returns ONE schedule (WFM or Delivery) with a label.
